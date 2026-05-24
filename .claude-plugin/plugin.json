@@ -1,0 +1,9 @@
+{
+  "name": "xdgfx-skills",
+  "version": "1.0.0",
+  "author": "xdgfx",
+  "description": "Claude Code skills by xdgfx",
+  "skills": [
+    "skills/wireviz"
+  ]
+}
