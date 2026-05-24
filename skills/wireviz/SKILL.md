@@ -1,13 +1,13 @@
 ---
 name: wireviz
 description: >
-  Generate, modify, and extend WireViz YAML files for documenting electrical cables and wiring harnesses.
-  Use this skill whenever the user mentions WireViz, cable harnesses, wiring diagrams, connectors, wiring YAML,
-  or wants to add/change/extend anything in a .yml file that describes electrical wiring. Also trigger for
-  requests like "add a connector", "extend the harness", "add a sensor to the wiring", "change the wire colour",
-  "update the pinout", "add a cable run", or any task involving electrical wiring documentation.
-  Even if the user doesn't say "WireViz" explicitly — if they're editing a wiring YAML file or describing
-  cable/connector work, use this skill.
+    Generate, modify, and extend WireViz YAML files for documenting electrical cables and wiring harnesses.
+    Use this skill whenever the user mentions WireViz, cable harnesses, wiring diagrams, connectors, wiring YAML,
+    or wants to add/change/extend anything in a .yml file that describes electrical wiring. Also trigger for
+    requests like "add a connector", "extend the harness", "add a sensor to the wiring", "change the wire colour",
+    "update the pinout", "add a cable run", or any task involving electrical wiring documentation.
+    Even if the user doesn't say "WireViz" explicitly — if they're editing a wiring YAML file or describing
+    cable/connector work, use this skill.
 ---
 
 # WireViz Skill
@@ -29,6 +29,7 @@ Before doing anything else, read the full `.yml` file the user is working on. Al
 larger projects and will define connectors, cables, and YAML anchors that you can reuse.
 
 Look for:
+
 - Naming conventions (e.g. `SYSTEM_NAME_CONN`, `SYSTEM_NAME_CABLE`, or simple `X1`/`W1`)
 - Cable gauge and colour patterns in use (so new elements match)
 - YAML anchor templates (e.g. `&deutsch_8pin`, `&twin_core_cable`) that you should reuse
@@ -38,6 +39,7 @@ Look for:
 ### 2. Infer what you can
 
 Before asking the user anything, derive as much as possible from the existing YAML:
+
 - **Wire gauge** — match the gauge of whatever cable is connecting into the same connector
 - **Wire colours** — if the system uses a colour-coded bundle, continue the same colour pattern; if not, use
   logical conventions (RD=power, BK/WH=ground, others for signals)
@@ -71,9 +73,8 @@ time and produces a diagram that doesn't match their physical installation.
 ### 4. Output clean, valid YAML
 
 When outputting changes:
+
 - Show the **full updated section**, not a diff — users can paste it directly
-- If only adding new components, show the new blocks clearly labelled with a comment like
-  `# --- NEW: Shower temperature extension ---`
 - Reuse existing YAML anchors where appropriate (`<<: *deutsch_8pin`)
 - Maintain the same indentation style (2 spaces is standard)
 - Use `wirelabels` if the file already uses them; don't mix numeric and label references in the same file
@@ -85,6 +86,7 @@ When outputting changes:
 This is the most common task: the user has a diagram that ends at a connector, and wants to continue it further.
 
 **Steps:**
+
 1. Identify the connector being extended — read its `pinlabels` to understand what signals are present
 2. Check what cable currently terminates at that connector (what gauge, colours, and labels it uses)
 3. Determine what new component(s) are being added (device, intermediate connector, sensor, etc.)
@@ -108,19 +110,19 @@ electrical problems before outputting YAML and flag them to the user.
 
 Approximate continuous current ratings for common gauges (at ~70°C, in a bundle):
 
-| mm²   | AWG (approx) | Max continuous current |
-|-------|--------------|------------------------|
-| 0.25  | 24 AWG       | ~2 A (signal only)     |
-| 0.5   | 20 AWG       | ~5 A                   |
-| 0.75  | 18 AWG       | ~7.5 A                 |
-| 1.0   | 16–17 AWG    | ~10 A                  |
-| 1.5   | 16 AWG       | ~16 A                  |
-| 2.5   | 14 AWG       | ~25 A                  |
-| 4.0   | 12 AWG       | ~32 A                  |
-| 6.0   | 10 AWG       | ~40 A                  |
-| 10.0  | 8 AWG        | ~55 A                  |
-| 16.0  | 6 AWG        | ~73 A                  |
-| 25.0  | 4 AWG        | ~95 A                  |
+| mm²  | AWG (approx) | Max continuous current |
+| ---- | ------------ | ---------------------- |
+| 0.25 | 24 AWG       | ~2 A (signal only)     |
+| 0.5  | 20 AWG       | ~5 A                   |
+| 0.75 | 18 AWG       | ~7.5 A                 |
+| 1.0  | 16–17 AWG    | ~10 A                  |
+| 1.5  | 16 AWG       | ~16 A                  |
+| 2.5  | 14 AWG       | ~25 A                  |
+| 4.0  | 12 AWG       | ~32 A                  |
+| 6.0  | 10 AWG       | ~40 A                  |
+| 10.0 | 8 AWG        | ~55 A                  |
+| 16.0 | 6 AWG        | ~73 A                  |
+| 25.0 | 4 AWG        | ~95 A                  |
 
 **If the user specifies (or you infer) a gauge that seems undersized for the expected load**, say so clearly
 before outputting YAML. For example: "A 12V→5V USB supply drawing up to 3 A needs at least 0.5 mm² cable —
@@ -134,6 +136,7 @@ constraints you don't know about.
 ### Fuse sizing
 
 If adding a new circuit off a fuse panel, check:
+
 - The fuse should protect the **cable**, not just the device
 - Fuse rating should be ≤ the cable's current capacity
 - Typical rule: fuse at ~80% of cable capacity, or just above the expected load
@@ -146,6 +149,7 @@ included.
 ## Creating a New Diagram
 
 If writing from scratch, ask the user for:
+
 1. What devices need connecting (name, pin count, pin functions)
 2. Cable length(s)
 3. Wire gauge (if they know it; otherwise suggest based on typical current for the application)
@@ -158,6 +162,7 @@ Start with the simplest working structure and add complexity only as needed.
 ## Validation Checklist
 
 Before presenting output, mentally verify:
+
 - Every connector has at least one of: `pincount`, `pins`, or `pinlabels`
 - Every pin referenced in `connections:` actually exists on that connector
 - Every wire index referenced in `connections:` is within the cable's `wirecount`
