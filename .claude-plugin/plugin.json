@@ -4,6 +4,8 @@
   "author": "xdgfx",
   "description": "Claude Code skills by xdgfx",
   "skills": [
-    "skills/wireviz"
+    "skills/wireviz",
+    "skills/pipeviz",
+    "skills/notion-sessions"
   ]
 }

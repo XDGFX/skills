@@ -1,0 +1,40 @@
+{
+  "skill_name": "notion-sessions",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "Read my Notion session on the business game teaching analysis and give me the headline recommendations for where strat.bz should head.",
+      "expected_output": "Summary of the Evidence Review (Final) page's recommendations, fetched directly by canonical ID without searching",
+      "files": [],
+      "assertions": [
+        "Fetched Evidence Review (Final) directly by ID 396d0d51-fde9-811d-94b3-f32b6a5cbacd with zero notion-search calls",
+        "Answer summarises recommendations and names which page was used",
+        "Did not fetch the v1 or v2 (Refined) near-duplicates as the source"
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "Can you find my notion session about the external camera system for hailey and summarise what approach we decided on?",
+      "expected_output": "Summary of the External Camera System Design session note (not in the canonical index, so found via search), plus a pending entry added to the candidates ledger",
+      "files": [],
+      "assertions": [
+        "Located the External Camera System Design session page and summarised the decided approach",
+        "Appended a 'pending' candidate line (title, ID, project hailey, hits: 1) to references/candidates.md",
+        "Did NOT prompt the user to update the workspace map (only 1 hit so far)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "We've just finished a session [building the notion-sessions skill]. /log-session — TEST constraint: title exactly 'TEST — notion-sessions skill validation (safe to delete)', Project: general.",
+      "expected_output": "One Sessions page created with correct properties on the first attempt, using the workspace map instead of fetching the schema",
+      "files": [],
+      "assertions": [
+        "Created exactly one page with the exact TEST title, Project general, Status Complete",
+        "Tags drawn only from the closed set (architecture/electrical/debugging/planning/firmware/hardware/infrastructure)",
+        "Did not fetch the Sessions database schema before creating (used data_source_id 06c59d57-d167-4164-9e54-d33a27789071 from the map)",
+        "notion-create-pages succeeded on the first attempt with no validation errors",
+        "Body uses the house template (scope callout, Outcome, omitted empty sections) in British English"
+      ]
+    }
+  ]
+}
