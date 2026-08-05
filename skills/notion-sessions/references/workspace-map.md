@@ -1,6 +1,6 @@
 # Workspace map
 
-Authoritative index of Cal's Notion workspace. Verified 2026-07-26. If a write fails validation against this map, the map is stale — follow the Self-maintenance procedure in SKILL.md.
+Authoritative index of the user's Notion workspace. Verified 2026-07-26. If a write fails validation against this map, the map is stale — follow the Self-maintenance procedure in SKILL.md.
 
 ## Key pages
 
@@ -41,7 +41,7 @@ Views: "All Sessions" (Date desc) plus per-project filtered views for strat.bz, 
 
 Pages repeatedly used as reference material. Fetch by ID; do not re-search.
 
-| When Cal says… | Page | ID |
+| When the user says… | Page | ID |
 |---|---|---|
 | "teaching analysis" / "business game evaluation" / "learning objectives analysis" (strat.bz) | **Evidence Review (Final) — What Makes a University Business Simulation Valuable, and Where strat.bz Should Head** | `396d0d51-fde9-811d-94b3-f32b6a5cbacd` |
 | "comparison with an existing business game" / "competitor analysis" | Competitor Analysis — GoVenture CEO vs strat.bz | `396d0d51…81b1…` (search title if truncated ID fails) |
@@ -50,4 +50,4 @@ Pages repeatedly used as reference material. Fetch by ID; do not re-search.
 | "hailey aero plan" / "CFD plan" | Aero Development Plan — Fast Design-Test System | search "Aero Development Plan" |
 | "roof rack aero" | Roof Rack Aero CFD | `27ed0d51fde9809fb1b1ca159c4102f8` |
 
-Note: Evidence Review has near-duplicate **v1** and **v2 (Refined)** siblings — always use **(Final)** unless Cal says otherwise.
+Note: Evidence Review has near-duplicate **v1** and **v2 (Refined)** siblings — always use **(Final)** unless the user says otherwise.

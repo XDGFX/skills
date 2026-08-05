@@ -1,11 +1,12 @@
 ---
 name: notion-sessions
-description: "Cal's persistent work journal lives in Notion; this skill is the ONLY correct way to read or write it. Always use it — never answer from memory or improvise a Notion call — when the user: asks what was decided, discussed, or worked on before ('what did we decide about X?', 'find that session about Y', 'it's written up somewhere'); says a decision is settled and should be recorded; asks to log, save, or write up this session's work, findings, or analysis so they can read it later (session write-ups always go to Notion, named or not); signals wrap-up of substantial work ('that's merged', 'before I head off, save this'); or mentions their Notion workspace at all. Any request to remember, retrieve, or durably record project work = this skill, immediately, before any other tool. Do not use for coding tasks that merely involve the words session/notes/notion (Notion-style UIs, MCP server setup, database tables, scratch files, app logging). Trigger: /log-session."
+description: "Read and write the user's Notion work journal — the Sessions database of dated work notes, and the project pages under Projects. Once the user has asked for Notion, this is the only correct way to reach it: never improvise a Notion call or answer from memory. Use it to log a session to Notion, or to recall a prior Notion session. Trigger: /log-session."
+disable-model-invocation: true
 ---
 
 # notion-sessions
 
-Cal's Notion workspace is the durable memory across coding sessions: project pages under a Projects parent, and a **Sessions database** of dated work notes that later sessions read back as reference material. This skill replaces the old "Agent Instructions" page in Notion (now archived) — everything an agent needs is here.
+The user's Notion workspace is the durable memory across coding sessions: project pages under a Projects parent, and a **Sessions database** of dated work notes that later sessions read back as reference material. This skill replaces the old "Agent Instructions" page in Notion (now archived) — everything an agent needs is here.
 
 **First step, always:** read `references/workspace-map.md`. It contains the Sessions database ID and schema, the closed Tags/Project vocabularies, and an index of canonical pages. Using it avoids the three failure modes that recur in transcripts: re-fetching the database schema every session, guessing tag values that fail validation, and re-searching for pages that are already known.
 
@@ -13,11 +14,11 @@ Write all Notion content in British English. Notes are internal working document
 
 ## Recalling prior work
 
-Cal usually describes pages from memory ("the session where we compared with an existing business game") rather than linking them.
+The user usually describes pages from memory ("the session where we compared with an existing business game") rather than linking them.
 
 1. Check the canonical pages index in the workspace map first. If the description matches an indexed page, fetch it directly by ID — skip searching.
 2. Otherwise `notion-search`. If the first query misses, reformulate once with different key nouns before widening.
-3. When several similarly-titled versions surface (v1 / v2 / Final), prefer the one marked Final or most recent, and tell Cal which one you used.
+3. When several similarly-titled versions surface (v1 / v2 / Final), prefer the one marked Final or most recent, and tell the user which one you used.
 4. If a search-resolved page was not in the index, record it in the candidates ledger (see Self-maintenance).
 
 ## Writing a session note (/log-session)
@@ -32,7 +33,7 @@ Cal usually describes pages from memory ("the session where we compared with an 
    - **Project** — one of the closed slugs in the map. `general` is the catch-all for non-project work.
    - **Date** — today. `date:Date:is_datetime` must be the integer `0`, not the string `"0"`.
    - **Status** — `Complete` (use `Draft` only if the note is knowingly unfinished).
-   - **Tags** — 1–2 values from the closed list in the map. Never invent a value; if nothing fits, pick the nearest and tell Cal it was approximate (see Self-maintenance).
+   - **Tags** — 1–2 values from the closed list in the map. Never invent a value; if nothing fits, pick the nearest and tell the user it was approximate (see Self-maintenance).
 
 **Body structure** — use the sections that apply, omit empty ones:
 
@@ -68,7 +69,7 @@ This has historically been skipped — the decision ends up only in the session 
 
 The workspace map is useful only while it matches reality, so the skill maintains itself via `references/candidates.md`:
 
-- **Unindexed page resolved by search** → append/increment a line in the ledger (title, ID, project, hit count, date). At **2 hits**, after finishing the task, ask Cal once: "Second session that's needed *X* — add it to the skill's workspace map?" On yes, move it into the map's canonical index; on no, mark it `declined` and never re-ask.
+- **Unindexed page resolved by search** → append/increment a line in the ledger (title, ID, project, hit count, date). At **2 hits**, after finishing the task, ask the user once: "Second session that's needed *X* — add it to the skill's workspace map?" On yes, move it into the map's canonical index; on no, mark it `declined` and never re-ask.
 - **New project slug or database property change** (e.g. a Tags validation failure, a Project option that's appeared or vanished) → prompt immediately, same pattern. A validation failure means the map is stale: fetch the schema once, complete the write, then propose the map update.
 - Keep ledger entries one line each; prune `added`/`declined` rows on sight if the ledger exceeds ~20 lines.
 
