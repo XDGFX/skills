@@ -237,6 +237,14 @@
                 font-size: 24px;
                 margin: 10px 0 10px;
             }
+            .cand-head .num {
+                color: var(--c);
+                margin-right: 12px;
+            }
+            .cand-head .num::before {
+                content: '#';
+                opacity: 0.6;
+            }
             .files {
                 display: flex;
                 flex-wrap: wrap;
@@ -563,7 +571,7 @@
             </header>
 
             <a class="pick" href="#c-1">
-                <div class="eyebrow">Top recommendation</div>
+                <div class="eyebrow">Top recommendation · candidate 1</div>
                 <h3>Collapse the Order intake pipeline</h3>
                 <p>Every Order bug this quarter crossed three of its four modules.</p>
             </a>
@@ -581,7 +589,7 @@
                             <span class="tag">Strong</span>
                             <span class="tag dep">In-process</span>
                         </div>
-                        <h3>Collapse the Order intake pipeline</h3>
+                        <h3><span class="num">1</span>Collapse the Order intake pipeline</h3>
                         <ul class="files">
                             <li><code>src/orders/handler.ts</code></li>
                             <li><code>src/orders/validator.ts</code></li>
@@ -654,7 +662,7 @@ flowchart TD
                             <span class="tag">Worth exploring</span>
                             <span class="tag dep">Ports &amp; adapters</span>
                         </div>
-                        <h3>Deepen the Pricing module behind one seam</h3>
+                        <h3><span class="num">2</span>Deepen the Pricing module behind one seam</h3>
                         <ul class="files">
                             <li><code>src/pricing/</code></li>
                             <li><code>src/pricing/client.ts</code></li>
@@ -712,7 +720,7 @@ flowchart TD
                             <span class="tag">Speculative</span>
                             <span class="tag dep">Local-substitutable</span>
                         </div>
-                        <h3>Shrink the Basket interface</h3>
+                        <h3><span class="num">3</span>Shrink the Basket interface</h3>
                         <ul class="files">
                             <li><code>src/basket/basket.ts</code></li>
                         </ul>

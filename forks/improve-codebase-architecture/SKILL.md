@@ -61,7 +61,7 @@ Open the report with a **Top recommendation** card: which candidate you'd tackle
 
 See [HTML-REPORT.md](HTML-REPORT.md) for what goes in each section, which diagram kit to pick, and the tone.
 
-Do NOT propose interfaces yet. After the file is written, ask the user: "Which of these would you like to explore?"
+Do NOT propose interfaces yet. After the file is written, ask the user: "Which of these would you like to explore?", listing each candidate as its number and title.
 
 ### 3. Grilling loop
 

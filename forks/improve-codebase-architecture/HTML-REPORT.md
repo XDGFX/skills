@@ -14,13 +14,14 @@ The diagrams carry the weight. Prose is sparse, plain, and uses the glossary ter
 
 ## Top recommendation
 
-One card linking to its candidate by `id`: the candidate's name and one sentence on why it goes first.
+One card linking to its candidate by `id`: the candidate's number in the eyebrow, its name, and one sentence on why it goes first.
 
 ## Candidates
 
 Strongest first. Each is one `article.candidate` with its strength as a class (`strong`, `exploring`, `speculative`):
 
 - **Tags**: the strength (`Strong`, `Worth exploring`, `Speculative`) and the dependency category (`In-process`, `Local-substitutable`, `Ports & adapters`, `Mock`).
+- **Number**: `span.num` at the start of the title, counting from 1 in page order, so the user can pick a candidate by number. The card's `id` is `c-<number>`.
 - **Title**: short, names the deepening (e.g. "Collapse the Order intake pipeline").
 - **Files**: each file or module involved, in `<code>`.
 - **Before / After**: the centrepiece, side by side. See the diagram kit below.
