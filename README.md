@@ -27,3 +27,13 @@ tickets, orphaned epic children and ordering mistakes — then propose fixes and
 approved ones. Every write is re-validated against the live tracker first, and the whole plan is
 refused if any single action has gone stale. Designed to be re-run every few days on a large
 tracker: the second sweep only deep-reads what moved. Trigger: `/tracker-sweep`.
+
+## Forks
+
+`forks/` holds third-party skills carried with local changes, each with its upstream licence and
+an `UPSTREAM` file naming the commit it is based on. `forks/upstream-sync.sh check` lists
+upstream commits not yet taken in; `merge <fork>` three-way merges them. Forks are not part of
+the plugin.
+
+- `improve-codebase-architecture` from [mattpocock/skills](https://github.com/mattpocock/skills)
+  (MIT): the report is built from a filled template with dark mode and before/after cards.
