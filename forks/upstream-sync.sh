@@ -2,8 +2,7 @@
 # Keep forked third-party skills in step with their upstream. Each fork folder holds an
 # UPSTREAM file (repo, path, base commit); base is the upstream commit the fork last took in.
 #
-#   upstream-sync.sh check           list forks whose upstream path has moved past base
-#   upstream-sync.sh check --hook    same, but at most once a day and silent when all is current
+#   upstream-sync.sh check [fork]    list upstream commits past base, for one fork or all
 #   upstream-sync.sh merge <fork>    three-way merge base -> upstream into the fork, move base
 set -euo pipefail
 
@@ -23,27 +22,22 @@ pending() {
 }
 
 check() {
-  local hook=${1:-} stamp="$cache/last-check" found=0
-  if [ "$hook" = --hook ]; then
-    [ -n "$(find "$stamp" -mtime -1 2>/dev/null)" ] && exit 0
-    gh auth status >/dev/null 2>&1 || exit 0
-  fi
-  for f in "$forks"/*/UPSTREAM; do
-    [ -e "$f" ] || continue
+  local only=${1:-} found=0
+  for f in "$forks"/${only:-*}/UPSTREAM; do
+    [ -e "$f" ] || { echo "No fork called $only" >&2; exit 1; }
     local dir name commits
     dir=$(dirname "$f") name=$(basename "$dir")
-    commits=$(pending "$dir" 2>/dev/null) || { [ "$hook" = --hook ] && exit 0; echo "$name: upstream unreachable" >&2; continue; }
+    commits=$(pending "$dir" 2>/dev/null) || { echo "$name: upstream unreachable" >&2; continue; }
     if [ -n "$commits" ]; then
       found=1
       echo "Forked skill '$name' is $(wc -l <<<"$commits" | tr -d ' ') upstream commit(s) behind $(field "$dir" repo):"
       sed 's/^\([0-9a-f]\{10\}\)[0-9a-f]* /  \1 /' <<<"$commits"
     fi
   done
-  touch "$stamp"
   if [ "$found" = 1 ]; then
     echo "Merge with: $forks/upstream-sync.sh merge <fork>, then resolve any conflict markers."
-  elif [ "$hook" != --hook ]; then
-    echo "All forks match upstream."
+  else
+    echo "Up to date with upstream."
   fi
 }
 
@@ -103,5 +97,5 @@ merge() {
 case ${1:-} in
   check) check "${2:-}" ;;
   merge) merge "${2:-}" ;;
-  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

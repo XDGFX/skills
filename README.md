@@ -31,7 +31,7 @@ tracker: the second sweep only deep-reads what moved. Trigger: `/tracker-sweep`.
 ## Forks
 
 `forks/` holds third-party skills carried with local changes, each with its upstream licence and
-an `UPSTREAM` file naming the commit it is based on. `forks/upstream-sync.sh check` lists
+an `UPSTREAM` file naming the commit it is based on. `forks/upstream-sync.sh check [fork]` lists
 upstream commits not yet taken in; `merge <fork>` three-way merges them. Forks are not part of
 the plugin.
 

@@ -15,6 +15,10 @@ This command is _informed_ by the project's domain model and built on a shared d
 
 ## Process
 
+### 0. Check the fork against upstream
+
+This skill is a local fork. Run `~/git/skills/forks/upstream-sync.sh check improve-codebase-architecture`. If it lists upstream commits, show them to the user and ask whether to merge them first (`upstream-sync.sh merge improve-codebase-architecture`, then resolve its conflict markers with the `/resolving-merge-conflicts` skill and commit) or carry on. If upstream is unreachable, carry on.
+
 ### 1. Explore
 
 **Scope before you scan — YAGNI.** Deepening a module pays off by making future changes to it easier, so put extra weight on the parts of the codebase that have recently changed. Decide *where* to look before you look:
