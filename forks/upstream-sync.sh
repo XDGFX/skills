@@ -63,10 +63,11 @@ merge() {
   else
     git clone -q --filter=blob:none --no-checkout "https://github.com/$repo.git" "$clone"
   fi
-  head=$(git -C "$clone" rev-parse origin/HEAD)
+  # The newest commit touching the path, so check's walk back from upstream finds it as base.
+  head=$(git -C "$clone" log -1 --format=%H origin/HEAD -- "$path")
   [ "$head" = "$base" ] && { echo "$name already matches upstream."; exit 0; }
 
-  local tmp conflicts=() file
+  local conflicts=() file
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   while IFS=$'\t' read -r status file; do
