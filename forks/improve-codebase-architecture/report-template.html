@@ -1,0 +1,780 @@
+<!doctype html>
+<!--
+    Architecture review report template. Copy this file, keep the head, its stylesheet and the
+    Mermaid script as they are, and replace every example inside the main element with the
+    review's own content. Each component appears once below; repeat it as the review needs.
+    What goes in each section is in HTML-REPORT.md.
+-->
+<html lang="en-GB">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Architecture review · shop</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            rel="stylesheet"
+            href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+        />
+        <script type="module">
+            import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+            const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+            mermaid.initialize({
+                startOnLoad: true,
+                theme: dark ? 'dark' : 'neutral',
+                securityLevel: 'strict',
+                fontFamily: 'IBM Plex Sans, system-ui, sans-serif',
+            });
+        </script>
+        <style>
+            :root {
+                --paper: #f2f4f7;
+                --surface: #ffffff;
+                --inset: #f7f8fa;
+                --ink: #172033;
+                --muted: #5e6a7d;
+                --rule: #dde2ea;
+                --pencil: #2c59d6;
+                --strong: #0f8a5f;
+                --exploring: #b7791f;
+                --speculative: #7a8699;
+                --leak: #c23a2e;
+                --deep: #172033;
+                --on-deep: #f2f4f7;
+                --display: 'Bricolage Grotesque', system-ui, sans-serif;
+                --body: 'IBM Plex Sans', system-ui, sans-serif;
+                --mono: 'IBM Plex Mono', ui-monospace, monospace;
+            }
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --paper: #0f131a;
+                    --surface: #171c26;
+                    --inset: #1d2330;
+                    --ink: #e5e9f0;
+                    --muted: #97a1b3;
+                    --rule: #2a3140;
+                    --pencil: #86a6ff;
+                    --strong: #3cc48f;
+                    --exploring: #e3aa55;
+                    --speculative: #8f9aad;
+                    --leak: #f0786c;
+                    --deep: #d5dbe6;
+                    --on-deep: #0f131a;
+                }
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                background: var(--paper);
+                color: var(--ink);
+                font: 400 15px/1.6 var(--body);
+                -webkit-font-smoothing: antialiased;
+            }
+            main {
+                max-width: 1080px;
+                margin: 0 auto;
+                padding: 56px 24px 96px;
+            }
+            h1,
+            h2,
+            h3 {
+                font-family: var(--display);
+                font-weight: 700;
+                letter-spacing: -0.02em;
+                margin: 0;
+            }
+            code {
+                font-family: var(--mono);
+                font-size: 12.5px;
+            }
+            a {
+                color: var(--pencil);
+            }
+            a:focus-visible {
+                outline: 2px solid var(--pencil);
+                outline-offset: 2px;
+            }
+            .eyebrow {
+                font: 500 12px/1 var(--mono);
+                text-transform: uppercase;
+                letter-spacing: 0.12em;
+                color: var(--muted);
+            }
+
+            /* Masthead */
+            .masthead h1 {
+                font-size: clamp(44px, 8vw, 88px);
+                line-height: 0.95;
+                margin: 14px 0 10px;
+            }
+            .scope {
+                color: var(--muted);
+                margin: 0;
+            }
+            .scope code {
+                color: var(--ink);
+            }
+            /* The strip's segments are proportional to the counts: set flex-grow to each count. */
+            .strip {
+                display: flex;
+                gap: 3px;
+                height: 10px;
+                margin: 32px 0 10px;
+            }
+            .strip span {
+                border-radius: 2px;
+            }
+            .strip .strong {
+                background: var(--strong);
+            }
+            .strip .exploring {
+                background: var(--exploring);
+            }
+            .strip .speculative {
+                background: var(--speculative);
+            }
+            .tally {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px 22px;
+                font-size: 13px;
+                color: var(--muted);
+            }
+            .tally b {
+                font: 700 20px/1 var(--display);
+                color: var(--ink);
+                margin-right: 4px;
+            }
+            .legend {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px 22px;
+                margin-top: 18px;
+                font-size: 13px;
+                color: var(--muted);
+            }
+            .legend span {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .legend i {
+                display: inline-block;
+                width: 22px;
+                height: 14px;
+                border-radius: 3px;
+            }
+            .legend .k-module {
+                border: 1.5px solid var(--ink);
+            }
+            .legend .k-seam {
+                height: 0;
+                border-top: 2px dashed var(--muted);
+            }
+            .legend .k-leak {
+                height: 0;
+                border-top: 2px solid var(--leak);
+            }
+            .legend .k-deep {
+                background: var(--deep);
+            }
+
+            /* Top recommendation */
+            .pick {
+                display: block;
+                color: inherit;
+                text-decoration: none;
+                background: var(--surface);
+                border-radius: 14px;
+                padding: 24px 28px;
+                margin: 48px 0 72px;
+                border-top: 4px solid var(--pencil);
+            }
+            .pick .eyebrow {
+                color: var(--pencil);
+            }
+            .pick h3 {
+                font-size: 24px;
+                margin: 10px 0 6px;
+            }
+            .pick p {
+                margin: 0;
+                color: var(--muted);
+            }
+
+            .section-head {
+                display: flex;
+                align-items: baseline;
+                flex-wrap: wrap;
+                justify-content: space-between;
+                gap: 4px 16px;
+                border-bottom: 1px solid var(--rule);
+                padding-bottom: 12px;
+                margin: 72px 0 20px;
+            }
+            .section-head h2 {
+                font-size: 30px;
+            }
+
+            /* Candidate: the before/after pair is the centrepiece; the note sits beneath it */
+            .candidate {
+                background: var(--surface);
+                border-radius: 14px;
+                border-top: 4px solid var(--c);
+                margin-bottom: 28px;
+                overflow: hidden;
+                scroll-margin-top: 24px;
+            }
+            .candidate:target {
+                box-shadow: 0 0 0 2px var(--pencil);
+            }
+            .cand-head {
+                padding: 24px 28px 18px;
+            }
+            .cand-head h3 {
+                font-size: 24px;
+                margin: 10px 0 10px;
+            }
+            .files {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px 16px;
+                margin: 0;
+                padding: 0;
+                list-style: none;
+                color: var(--muted);
+            }
+            .tags {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+            .tag {
+                font: 500 11px/1 var(--mono);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                padding: 5px 8px;
+                border-radius: 999px;
+                color: var(--c);
+                background: color-mix(in srgb, var(--c) 12%, transparent);
+            }
+            .tag.dep {
+                --c: var(--muted);
+            }
+            .strong {
+                --c: var(--strong);
+            }
+            .exploring {
+                --c: var(--exploring);
+            }
+            .speculative {
+                --c: var(--speculative);
+            }
+
+            .diagrams {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                border-top: 1px solid var(--rule);
+                border-bottom: 1px solid var(--rule);
+            }
+            .diagrams figure {
+                margin: 0;
+                padding: 18px 22px 22px;
+                background: var(--inset);
+                min-height: 300px;
+                display: flex;
+                flex-direction: column;
+            }
+            .diagrams figure + figure {
+                border-left: 1px dashed var(--rule);
+            }
+            .diagrams figcaption {
+                margin-bottom: 14px;
+            }
+            .diagrams .after figcaption {
+                color: var(--c);
+            }
+            .diagram {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .diagram .mermaid {
+                margin: 0;
+                width: 100%;
+                text-align: center;
+                background: none;
+            }
+
+            .note {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+                gap: 24px;
+                padding: 22px 28px 26px;
+            }
+            .note h4 {
+                font: 500 12px/1 var(--mono);
+                text-transform: uppercase;
+                letter-spacing: 0.1em;
+                color: var(--muted);
+                margin: 0 0 8px;
+            }
+            .note p {
+                margin: 0;
+            }
+            .note ul {
+                margin: 0;
+                padding: 0;
+                list-style: none;
+            }
+            .note li::before {
+                content: '→ ';
+                color: var(--c);
+            }
+            .adr {
+                margin: 0 28px 24px;
+                padding: 10px 14px;
+                border-radius: 8px;
+                font-size: 14px;
+                background: color-mix(in srgb, var(--exploring) 12%, transparent);
+                border-left: 3px solid var(--exploring);
+            }
+
+            /* Diagram kit. Labels read as schematic: mono, uppercase, small. */
+            .mod {
+                font: 500 11px/1.3 var(--mono);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                border: 1.5px solid var(--ink);
+                border-radius: 6px;
+                padding: 8px 10px;
+                background: var(--surface);
+                text-align: center;
+            }
+            .mod.leak {
+                border-color: var(--leak);
+                color: var(--leak);
+            }
+            /* A deep module: heavy box, its now-internal parts shown faded inside it. */
+            .mod.deep {
+                background: var(--deep);
+                color: var(--on-deep);
+                border-color: var(--deep);
+                padding: 14px;
+                width: 100%;
+                max-width: 320px;
+            }
+            .mod.deep .interface {
+                display: block;
+                padding-bottom: 10px;
+                margin-bottom: 10px;
+                border-bottom: 1px solid color-mix(in srgb, var(--on-deep) 30%, transparent);
+            }
+            .internals {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 6px;
+                justify-content: center;
+            }
+            .internals span {
+                padding: 4px 8px;
+                border-radius: 4px;
+                border: 1px solid color-mix(in srgb, var(--on-deep) 30%, transparent);
+                opacity: 0.6;
+                text-transform: none;
+                letter-spacing: 0;
+            }
+            .seam {
+                align-self: stretch;
+                border-top: 2px dashed var(--muted);
+                margin: 12px 0;
+            }
+            .callers {
+                display: flex;
+                gap: 8px;
+                justify-content: center;
+                margin-bottom: 8px;
+            }
+            .callers .mod {
+                border-style: dotted;
+                color: var(--muted);
+            }
+            .col {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                width: 100%;
+            }
+            .arrow {
+                width: 2px;
+                height: 18px;
+                background: var(--muted);
+                position: relative;
+            }
+            .arrow::after {
+                content: '';
+                position: absolute;
+                bottom: -2px;
+                left: -4px;
+                border: 5px solid transparent;
+                border-top-color: var(--muted);
+                border-bottom: 0;
+            }
+
+            /* Cross-section: one band per module a call passes through; the height is its weight. */
+            .layers {
+                width: 100%;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            .band {
+                font: 500 11px/1 var(--mono);
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 0 12px;
+                height: 30px;
+                border-left: 4px solid var(--ink);
+                background: var(--surface);
+            }
+            .band small {
+                text-transform: none;
+                letter-spacing: 0;
+                color: var(--muted);
+            }
+            .band.thick {
+                height: 150px;
+                background: var(--deep);
+                color: var(--on-deep);
+                border-left-color: var(--c);
+            }
+            .band.thick small {
+                color: inherit;
+                opacity: 0.7;
+            }
+
+            /* Mass diagram: per module, interface bar beside implementation bar. Set each height. */
+            .mass {
+                display: flex;
+                align-items: flex-end;
+                justify-content: center;
+                gap: 28px;
+                height: 210px;
+                width: 100%;
+            }
+            .mass .pair {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 8px;
+                height: 100%;
+            }
+            .mass .bars {
+                flex: 1;
+                display: flex;
+                align-items: flex-end;
+                gap: 4px;
+            }
+            .mass .iface,
+            .mass .impl {
+                width: 22px;
+                border-radius: 3px 3px 0 0;
+            }
+            .mass .iface {
+                background: var(--leak);
+            }
+            .mass .impl {
+                background: var(--deep);
+            }
+            .mass .after-ok .iface {
+                background: var(--c);
+            }
+            .mass .label {
+                font: 500 10.5px/1.2 var(--mono);
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--muted);
+                text-align: center;
+            }
+            .mass-key {
+                display: flex;
+                gap: 14px;
+                justify-content: center;
+                margin-top: 12px;
+                font-size: 12px;
+                color: var(--muted);
+            }
+
+            @media (max-width: 720px) {
+                main {
+                    padding: 36px 16px 72px;
+                }
+                .cand-head,
+                .note {
+                    padding-left: 18px;
+                    padding-right: 18px;
+                }
+                .diagrams,
+                .note {
+                    grid-template-columns: minmax(0, 1fr);
+                }
+                .diagrams figure + figure {
+                    border-left: 0;
+                    border-top: 1px dashed var(--rule);
+                }
+                .adr {
+                    margin: 0 18px 20px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <main>
+            <header class="masthead">
+                <div class="eyebrow">Architecture review · 30 September 2026</div>
+                <h1>shop</h1>
+                <p class="scope">
+                    Scanned <code>src/orders/</code> and <code>src/pricing/</code>, the hot spots
+                    in the last 80 commits on <code>main</code>.
+                </p>
+                <!-- flex-grow on each segment is that strength's count -->
+                <div class="strip" aria-hidden="true">
+                    <span class="strong" style="flex-grow: 1"></span>
+                    <span class="exploring" style="flex-grow: 1"></span>
+                    <span class="speculative" style="flex-grow: 1"></span>
+                </div>
+                <div class="tally">
+                    <span><b>1</b>strong</span>
+                    <span><b>1</b>worth exploring</span>
+                    <span><b>1</b>speculative</span>
+                </div>
+                <div class="legend">
+                    <span><i class="k-module"></i>module</span>
+                    <span><i class="k-seam"></i>seam</span>
+                    <span><i class="k-leak"></i>leakage</span>
+                    <span><i class="k-deep"></i>deep module</span>
+                </div>
+            </header>
+
+            <a class="pick" href="#c-1">
+                <div class="eyebrow">Top recommendation</div>
+                <h3>Collapse the Order intake pipeline</h3>
+                <p>Every Order bug this quarter crossed three of its four modules.</p>
+            </a>
+
+            <section id="candidates">
+                <div class="section-head">
+                    <h2>Candidates</h2>
+                    <span class="eyebrow">Strongest first</span>
+                </div>
+
+                <!-- The strength class (strong, exploring, speculative) sets the colour. -->
+                <article class="candidate strong" id="c-1">
+                    <header class="cand-head">
+                        <div class="tags">
+                            <span class="tag">Strong</span>
+                            <span class="tag dep">In-process</span>
+                        </div>
+                        <h3>Collapse the Order intake pipeline</h3>
+                        <ul class="files">
+                            <li><code>src/orders/handler.ts</code></li>
+                            <li><code>src/orders/validator.ts</code></li>
+                            <li><code>src/orders/repo.ts</code></li>
+                        </ul>
+                    </header>
+                    <div class="diagrams">
+                        <!-- Mermaid for graph-shaped structure: call flow, dependencies, sequences. -->
+                        <figure class="before">
+                            <figcaption class="eyebrow">Before</figcaption>
+                            <div class="diagram">
+                                <pre class="mermaid">
+flowchart TD
+  H[OrderHandler] --> V[OrderValidator]
+  V --> R[OrderRepo]
+  H --> R
+  R -. leak .-> P[PricingClient]
+  classDef leak stroke:#c23a2e,stroke-width:2px,color:#c23a2e;
+  class R,P leak
+  linkStyle 3 stroke:#c23a2e,stroke-width:2px;
+                                </pre>
+                            </div>
+                        </figure>
+                        <!-- Hand-built boxes when the point is weight: one heavy module, internals faded. -->
+                        <figure class="after">
+                            <figcaption class="eyebrow">After</figcaption>
+                            <div class="diagram">
+                                <div class="col">
+                                    <div class="callers">
+                                        <span class="mod">HTTP</span>
+                                        <span class="mod">Tests</span>
+                                    </div>
+                                    <div class="arrow"></div>
+                                    <div class="seam"></div>
+                                    <div class="mod deep">
+                                        <span class="interface">Order intake · place(order)</span>
+                                        <div class="internals">
+                                            <span>validate</span>
+                                            <span>persist</span>
+                                            <span>price</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </figure>
+                    </div>
+                    <div class="note">
+                        <div>
+                            <h4>Problem</h4>
+                            <p>Placing an Order means calling three shallow modules in the right order.</p>
+                        </div>
+                        <div>
+                            <h4>Solution</h4>
+                            <p>One Order intake module owns validation, persistence and pricing.</p>
+                        </div>
+                        <div>
+                            <h4>Wins</h4>
+                            <ul>
+                                <li>Tests hit one interface</li>
+                                <li>Pricing stops leaking</li>
+                                <li>Delete two shallow modules</li>
+                            </ul>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="candidate exploring" id="c-2">
+                    <header class="cand-head">
+                        <div class="tags">
+                            <span class="tag">Worth exploring</span>
+                            <span class="tag dep">Ports &amp; adapters</span>
+                        </div>
+                        <h3>Deepen the Pricing module behind one seam</h3>
+                        <ul class="files">
+                            <li><code>src/pricing/</code></li>
+                            <li><code>src/pricing/client.ts</code></li>
+                        </ul>
+                    </header>
+                    <div class="diagrams">
+                        <!-- Cross-section: the modules one call passes through, thin to thick. -->
+                        <figure class="before">
+                            <figcaption class="eyebrow">Before</figcaption>
+                            <div class="diagram">
+                                <div class="layers">
+                                    <div class="band">PriceController <small>forwards</small></div>
+                                    <div class="band">PriceService <small>forwards</small></div>
+                                    <div class="band">PriceFacade <small>renames</small></div>
+                                    <div class="band">PriceMapper <small>copies fields</small></div>
+                                    <div class="band">PricingClient <small>does the work</small></div>
+                                </div>
+                            </div>
+                        </figure>
+                        <figure class="after">
+                            <figcaption class="eyebrow">After</figcaption>
+                            <div class="diagram">
+                                <div class="layers">
+                                    <div class="band">HTTP adapter <small>one of two</small></div>
+                                    <div class="band thick">
+                                        Pricing <small>quote(basket) · rules, currency, rounding</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </figure>
+                    </div>
+                    <div class="note">
+                        <div>
+                            <h4>Problem</h4>
+                            <p>Four pass-through modules sit between a caller and the Pricing logic.</p>
+                        </div>
+                        <div>
+                            <h4>Solution</h4>
+                            <p>One Pricing module; HTTP and in-memory adapters on its seam.</p>
+                        </div>
+                        <div>
+                            <h4>Wins</h4>
+                            <ul>
+                                <li>Locality: rules in one module</li>
+                                <li>Two adapters justify the seam</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <p class="adr">Contradicts ADR-0007, but worth reopening: its caching reason went with the CDN.</p>
+                </article>
+
+                <article class="candidate speculative" id="c-3">
+                    <header class="cand-head">
+                        <div class="tags">
+                            <span class="tag">Speculative</span>
+                            <span class="tag dep">Local-substitutable</span>
+                        </div>
+                        <h3>Shrink the Basket interface</h3>
+                        <ul class="files">
+                            <li><code>src/basket/basket.ts</code></li>
+                        </ul>
+                    </header>
+                    <div class="diagrams">
+                        <!-- Mass diagram: interface bar (left) against implementation bar (right). -->
+                        <figure class="before">
+                            <figcaption class="eyebrow">Before</figcaption>
+                            <div class="diagram">
+                                <div class="mass">
+                                    <div class="pair">
+                                        <div class="bars">
+                                            <span class="iface" style="height: 85%"></span>
+                                            <span class="impl" style="height: 95%"></span>
+                                        </div>
+                                        <span class="label">Basket</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Repeat the key in both figures so the bars line up. -->
+                            <div class="mass-key">
+                                <span>left: interface</span>
+                                <span>right: implementation</span>
+                            </div>
+                        </figure>
+                        <figure class="after">
+                            <figcaption class="eyebrow">After</figcaption>
+                            <div class="diagram">
+                                <div class="mass">
+                                    <div class="pair after-ok">
+                                        <div class="bars">
+                                            <span class="iface" style="height: 20%"></span>
+                                            <span class="impl" style="height: 95%"></span>
+                                        </div>
+                                        <span class="label">Basket</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mass-key">
+                                <span>left: interface</span>
+                                <span>right: implementation</span>
+                            </div>
+                        </figure>
+                    </div>
+                    <div class="note">
+                        <div>
+                            <h4>Problem</h4>
+                            <p>Basket's interface is nearly as wide as its implementation.</p>
+                        </div>
+                        <div>
+                            <h4>Solution</h4>
+                            <p>Expose add, remove and total; the rest becomes internal.</p>
+                        </div>
+                        <div>
+                            <h4>Wins</h4>
+                            <ul>
+                                <li>Interface shrinks by two thirds</li>
+                            </ul>
+                        </div>
+                    </div>
+                </article>
+            </section>
+        </main>
+    </body>
+</html>
