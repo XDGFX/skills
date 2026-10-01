@@ -1,1 +1,0 @@
-../../../../pipeviz/SYNTAX.md

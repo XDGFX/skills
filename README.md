@@ -11,14 +11,15 @@ A collection of Claude Code skills.
 ## Install (npx skills)
 
 ```bash
-npx skills add xdgfx/skills@wireviz
+npx skills add xdgfx/skills@tracker-sweep
 ```
 
 ## Skills
 
-### wireviz
+### Moved: wireviz and pipeviz
 
-Generate, modify, and extend WireViz YAML files for documenting electrical cables and wiring harnesses.
+Both were replaced by one `ferrule` skill, which lives with the renderer in
+[XDGFX/ferrule](https://github.com/XDGFX/ferrule) (`skills/ferrule`): `npx skills add xdgfx/ferrule@ferrule`.
 
 ### tracker-sweep
 
