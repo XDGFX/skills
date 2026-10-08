@@ -11,6 +11,9 @@ upstream is unreachable, carry on.
 
 Implement the work described by the user in the spec or tickets.
 
+If the user passes a ticket reference, fetch it from the issue tracker and state its title before
+starting. If the reference is ambiguous, ask.
+
 For ticketed implementation work, claim the ticket and then create or resume its dedicated Git
 worktree before reading or editing code. Work only in that worktree; the primary checkout is never
 the ticket workspace. Follow the repository's established `worktree-…` branch convention and include
