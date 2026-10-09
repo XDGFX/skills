@@ -1,11 +1,11 @@
 {
   "name": "xdgfx-skills",
   "version": "1.0.0",
-  "author": "xdgfx",
+  "author": { "name": "xdgfx" },
   "description": "Claude Code skills by xdgfx",
   "skills": [
-    "skills/notion-sessions",
-    "skills/tracker-sweep",
-    "skills/ticket-workflow"
+    "./skills/notion-sessions",
+    "./skills/tracker-sweep",
+    "./skills/ticket-workflow"
   ]
 }

@@ -1,0 +1,14 @@
+{
+    "name": "xdgfx",
+    "owner": {
+        "name": "xdgfx"
+    },
+    "description": "Claude Code skills by xdgfx.",
+    "plugins": [
+        {
+            "name": "xdgfx-skills",
+            "source": "./",
+            "description": "Ticket workflow, tracker sweeps and Notion work-journal skills."
+        }
+    ]
+}

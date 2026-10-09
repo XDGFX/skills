@@ -5,7 +5,8 @@ A collection of Claude Code skills.
 ## Install (Claude Code)
 
 ```
-/plugin install github:xdgfx/skills
+/plugin marketplace add xdgfx/skills
+/plugin install xdgfx-skills@xdgfx
 ```
 
 ## Install (npx skills)
