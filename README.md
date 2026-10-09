@@ -29,6 +29,13 @@ approved ones. Every write is re-validated against the live tracker first, and t
 refused if any single action has gone stale. Designed to be re-run every few days on a large
 tracker: the second sweep only deep-reads what moved. Trigger: `/tracker-sweep`.
 
+### ticket-workflow
+
+Carry a GitHub Issues ticket from claim to merge when several agents share one GitHub account: the
+assignee is the lock and a claim comment breaks ties, one worktree branch per ticket, draft PRs,
+merge and clean-up, and closing on delivery, including into integration branches. Sits on top of
+the `docs/agents/issue-tracker.md` that mattpocock/skills' `setup-matt-pocock-skills` writes.
+
 ## Forks
 
 `forks/` holds third-party skills carried with local changes, each with its upstream licence and

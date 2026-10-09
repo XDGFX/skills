@@ -5,6 +5,7 @@
   "description": "Claude Code skills by xdgfx",
   "skills": [
     "skills/notion-sessions",
-    "skills/tracker-sweep"
+    "skills/tracker-sweep",
+    "skills/ticket-workflow"
   ]
 }
