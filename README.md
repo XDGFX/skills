@@ -45,3 +45,5 @@ the plugin.
 
 - `improve-codebase-architecture` from [mattpocock/skills](https://github.com/mattpocock/skills)
   (MIT): the report is built from a filled template with dark mode and before/after cards.
+- `setup-matt-pocock-skills` from [mattpocock/skills](https://github.com/mattpocock/skills) (MIT):
+  seeds a `## Gates` section and a `parked` label, and points the tracker doc at `ticket-workflow`.

@@ -78,7 +78,7 @@ more useful than a confident wrong answer.
     "staleOpenDays": 45,
     "staleAssignmentDays": 14,
     "duplicateThreshold": 0.55,
-    "ignoreLabels": ["icebox"]
+    "ignoreLabels": ["icebox", "parked"]
 }
 ```
 

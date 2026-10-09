@@ -32,7 +32,7 @@ const DEFAULTS = {
     staleOpenDays: 45,
     staleAssignmentDays: 14,
     duplicateThreshold: 0.55,
-    ignoreLabels: ['wontfix', 'icebox'],
+    ignoreLabels: ['wontfix', 'icebox', 'parked'],
 };
 const configPath = args.config || '.tracker-sweep/config.json';
 const config = { ...DEFAULTS, ...(existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {}) };
