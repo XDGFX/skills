@@ -27,7 +27,8 @@ Both were replaced by one `ferrule` skill, which lives with the renderer in
 Rules for building Autodesk Fusion models the way a disciplined person would, so the result can be
 opened, read and changed by hand: the origin on a functional datum, native sketch tools, a few
 dimensions between the things they relate, named parameters only for shared or measured values,
-and holes and repeats as features. Carries the Fusion API call behind each tool, and a blind
+holes and repeats as features, assemblies held by the joints the real thing has, and fasteners
+from Fusion's library instead of modelled. Carries the Fusion API call behind each tool, and a blind
 review in which a second agent reads the finished model without knowing what the part is.
 
 ### tracker-sweep

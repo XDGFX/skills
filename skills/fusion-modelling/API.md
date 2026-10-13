@@ -64,6 +64,57 @@ thing using another.
   name the sketch for the thing and the feature for the action (`hook`, `hook extrude`).
 - An extrude from a sketch on a face runs along the face's normal, out of the solid. Cut with
   the negative direction.
+- An extrude that starts off its sketch plane: `input.startExtent =
+  OffsetStartDefinition.create(ValueInput.createByString(expr))`. Prefer a named offset plane
+  when the height is something a person would look for.
+- `timelineGroups.add(i, i)` raises "At least 2 features needed for a group". A stage with one
+  feature goes ungrouped, under a name that says what it is.
+
+## Assemblies
+
+- **Insert a part**: `occurrences.addByInsert(dataFile, Matrix3D.create(), True)` links the
+  saved document. A linked insert needs both documents saved in the same project. The
+  transform is only where it lands before its joint moves it.
+- **Insert under a sub-component**: `parent.component.occurrences.addByInsert(f, m,
+  True).createForAssemblyContext(parent)`.
+- **Joints**: `joints.createInput(geoOne, geoTwo)`, then `setAsRigidJointMotion()`,
+  `setAsRevoluteJointMotion(axis)`, `setAsSliderJointMotion(axis)`, `setAsBallJointMotion(...)`
+  and so on, then `joints.add(input)`. Build each `JointGeometry` from the real feature:
+  `JointGeometry.createByCylinderOrConeFace` for a hole or pin,
+  `createByPlanarFace`, `createByPoint`. Take the face from the occurrence's proxy
+  (`occ.bRepBodies`, or `entity.createForAssemblyContext(occ)`), not from the component.
+- `asBuiltJoints` joins two occurrences where they already sit. Use it only for parts placed by
+  something real, such as a sub-assembly imported whole.
+- Ground with `occ.isGroundToParent = True`. Rule 23's sub-assemblies are the case for it, with
+  an exact transform.
+- Name with `occ.component.name` for a part made in place, and `joint.name`. An inserted
+  document's occurrence takes the document's name and a `:n` suffix that cannot be changed, so
+  the joint's name carries which one it is.
+- Joint limits (`joint.jointMotion.slideLimits.minimumValue`) take numbers in centimetres or
+  radians, not expressions. A drive value takes an expression: `joint.angle.expression`.
+- Linked instances of one sub-assembly share its internal joints, so they move together.
+  `occ.breakLink()` gives an instance its own.
+- After a part is rebuilt, joints to its old faces fail. Repoint them, or delete last-first:
+  deleting in timeline order raises `VCS_JOINT_FAILURE`.
+
+## Fasteners
+
+Fusion's fastener library has no insert call. What the API has, as a preview that may change:
+
+- `occurrence.definition` is a `FastenerOccurrenceDefinition` for a library fastener, with
+  `isSizeUpToDate` and `updateSize()`. Use it to check what the user placed.
+- The commands exist and open their dialogs: `ui.commandDefinitions.itemById(
+  'FusionFastenersCommand').execute()` for Insert Fastener, also `FastenersInsertSimilar`,
+  `FastenersAllStacksUpdateCmd`. A script cannot fill in another command's dialog.
+- The fasteners a hub has used are ordinary documents in its `Standard Components` project,
+  under `Fasteners/<kind>/<standard>` (for example `Fasteners/Nuts/DIN 934`), reachable through
+  `app.data.dataProjects`.
+
+To attempt a placement: look in `dir(adsk.fusion)` and on `Occurrences` for an insert method
+that has arrived since this was written, and use it if there is one. If there is not, do not
+substitute `addByInsert` of a library file with a hand-made joint: it has not been shown to
+produce a real fastener, and one trial of it hung Fusion. Hand the user the list rule 18 asks
+for. They insert the first of each kind; Insert Similar does the rest.
 
 ## Where the API differs from the UI
 
@@ -83,5 +134,19 @@ thing using another.
   feature uses the sketch.
 - A script run through the Fusion MCP keeps its globals between calls. Define `run(context)`
   and put the work inside it, so an older script's `run` is not called again.
-- `app.documents` includes every referenced document. Find one by name; do not assume the
-  active document is the one just built.
+- `app.documents` includes every referenced document, and can hold stale versions of one
+  under the same name. Find a document by name and keep the one where
+  `d.dataFile.versionNumber == d.dataFile.latestVersionNumber`; do not assume the active
+  document is the one just built.
+- `app.activeDocument` is `None` when nothing is open.
+- A document made by importing, with no timeline, has no parameters: `design.userParameters`
+  raises "this is not a parametric design". Check `design.designType`.
+- `materialLibrary.appearances.itemByName(name)` raises `invalid name` for a name that is not
+  there, where most `itemByName` calls return `None`.
+- The MCP gives a script about a minute. A large assembly rebuild runs longer: build in stages,
+  one call each. After a timeout Fusion may still be working or waiting on a dialog, so check
+  with a small read-only script before sending anything else, and tell the user if it does not
+  answer.
+- Reported once and not confirmed: `occurrences.addByInsert` intermittently raising
+  `InternalValidationError : group`, cured by running again; and Fusion hanging when a ball
+  joint's yaw axis is changed on an existing joint.

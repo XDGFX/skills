@@ -122,6 +122,50 @@ def describe_feature(f, out):
         out.append('      %s' % '; '.join(b for b in bits if b))
 
 
+JOINT_TYPES = {0: 'rigid', 1: 'revolute', 2: 'slider', 3: 'cylindrical', 4: 'pin-slot', 5: 'planar', 6: 'ball'}
+
+
+def describe_assembly(des, out):
+    root = des.rootComponent
+    occs = list(root.allOccurrences)
+    if not occs:
+        return
+    out.append('OCCURRENCES %d' % len(occs))
+    for o in occs:
+        t = o.transform2.translation
+        moved = any(abs(v) > 1e-6 for v in (t.x, t.y, t.z))
+        fastener = kind(o.definition) == 'FastenerOccurrenceDefinition' if o.definition else False
+        out.append('  %s"%s"%s%s%s%s' % (
+            '  ' * (o.fullPathName.count('+')), o.name,
+            ' linked' if o.isReferencedComponent else '',
+            ' library fastener' if fastener else '',
+            ' GROUNDED' if o.isGroundToParent else '',
+            ' at %s, %s, %s mm' % (mm(t.x), mm(t.y), mm(t.z)) if moved else ' at the origin'))
+    held = set()
+    for label, joints in (('JOINTS', root.allJoints), ('AS-BUILT JOINTS', root.allAsBuiltJoints)):
+        joints = list(joints)
+        out.append('%s %d' % (label, len(joints)))
+        for j in joints:
+            ends = []
+            for o in (j.occurrenceOne, j.occurrenceTwo):
+                ends.append('"%s"' % o.name if o else 'the root')
+                if o:
+                    held.add(o.fullPathName)
+            bits = [JOINT_TYPES.get(j.jointMotion.jointType, '?'), ' to '.join(ends)]
+            for name in ('rotationLimits', 'slideLimits'):
+                lim = getattr(j.jointMotion, name, None)
+                if lim is not None and (lim.isMinimumValueEnabled or lim.isMaximumValueEnabled):
+                    bits.append('limited')
+            for name in ('offset', 'angle'):
+                p = getattr(j, name, None)
+                if p is not None and p.expression.strip() not in ('0 mm', '0 cm', '0 in', '0 deg', '0.0 deg', '0.00 mm'):
+                    bits.append('%s %s' % (name, p.expression))
+            out.append('  "%s": %s%s' % (j.name, '; '.join(bits), '' if j.healthState == 0 else '  ' + HEALTH.get(j.healthState, str(j.healthState))))
+    loose = [o.name for o in root.occurrences if not o.isGroundToParent and o.fullPathName not in held]
+    if loose:
+        out.append('HELD BY NOTHING: %s' % ', '.join('"%s"' % n for n in loose))
+
+
 def picture(app, sk, others, path):
     for s in others:
         s.isVisible = s == sk
@@ -160,6 +204,11 @@ def build_report(doc_name=None, pictures=None):
 
     comps = [c for c in des.allComponents]
     out.append('COMPONENTS %d: %s' % (len(comps), ', '.join('"%s" (%d bodies: %s)' % (c.name, c.bRepBodies.count, ', '.join(b.name for b in c.bRepBodies)) for c in comps)))
+
+    try:
+        describe_assembly(des, out)
+    except Exception as e:
+        out.append('ASSEMBLY could not be read: %s' % e)
 
     exprs = [p.expression for p in des.allParameters]
     out.append('USER PARAMETERS %d' % des.userParameters.count)
