@@ -96,6 +96,17 @@ thing using another.
   `occ.breakLink()` gives an instance its own.
 - After a part is rebuilt, joints to its old faces fail. Repoint them, or delete last-first:
   deleting in timeline order raises `VCS_JOINT_FAILURE`.
+- **Never delete a mechanism's joints one by one.** Fusion re-solves the half-dismantled
+  assembly after each `joint.deleteMe()`, and with limited ball joints that locked it up for
+  good. When a script-owned assembly really must be emptied, `design.timeline.moveToBeginning()`
+  then `design.timeline.deleteAllAfterMarker()` does it with no solves. Rule 25 still comes
+  first.
+- Setting one joint's drive value lets every other free joint drift, and a joint cannot be
+  locked through the API. To pose something by parameter, a rigid `Joint` (not as-built) with
+  `joint.angle.expression = '<user parameter>'` holds. A joint made on a sketch point turns
+  about that sketch's normal.
+- `DataFile.deleteMe()` on an unused document raised `InternalValidationError` every time one
+  session tried it. Ask the user to remove documents.
 
 ## Fasteners
 
@@ -145,9 +156,9 @@ for. They insert the first of each kind; Insert Similar does the rest.
   there, where most `itemByName` calls return `None`.
 - The MCP call times out after a minute, and the script carries on running in Fusion. A
   timeout is not a hang, and a call sent after it only queues behind the running script,
-  read-only ones included. Build a large assembly in stages, one call each. After a timeout,
-  wait, then send one small read-only script; if that times out too, Fusion is stuck or
-  waiting on a dialog, so stop and tell the user.
+  read-only ones included. Build a large assembly in stages, one call each, and have a long
+  script write its progress to a file, so it can be watched without sending Fusion anything.
+  If the file stops moving, Fusion is stuck or waiting on a dialog: stop and tell the user.
 - One session drives Fusion at a time. Two agents' scripts queue behind each other and neither
   can tell whose call is stuck. If another session may be using Fusion, ask the user first.
 - Reported once and not confirmed: `occurrences.addByInsert` intermittently raising

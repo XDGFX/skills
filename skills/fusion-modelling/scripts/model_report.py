@@ -127,20 +127,24 @@ JOINT_TYPES = {0: 'rigid', 1: 'revolute', 2: 'slider', 3: 'cylindrical', 4: 'pin
 
 def describe_assembly(des, out):
     root = des.rootComponent
-    occs = list(root.allOccurrences)
-    if not occs:
+    if not root.occurrences.count:
         return
-    out.append('OCCURRENCES %d' % len(occs))
-    for o in occs:
-        t = o.transform2.translation
-        moved = any(abs(v) > 1e-6 for v in (t.x, t.y, t.z))
-        fastener = kind(o.definition) == 'FastenerOccurrenceDefinition' if o.definition else False
-        out.append('  %s"%s"%s%s%s%s' % (
-            '  ' * (o.fullPathName.count('+')), o.name,
-            ' linked' if o.isReferencedComponent else '',
-            ' library fastener' if fastener else '',
-            ' GROUNDED' if o.isGroundToParent else '',
-            ' at %s, %s, %s mm' % (mm(t.x), mm(t.y), mm(t.z)) if moved else ' at the origin'))
+    out.append('OCCURRENCES %d' % root.allOccurrences.count)
+
+    def walk(occs, depth):
+        for o in occs:
+            t = o.transform2.translation
+            moved = any(abs(v) > 1e-6 for v in (t.x, t.y, t.z))
+            fastener = kind(o.definition) == 'FastenerOccurrenceDefinition' if o.definition else False
+            out.append('  %s"%s"%s%s%s%s' % (
+                '  ' * depth, o.name,
+                ' linked' if o.isReferencedComponent else '',
+                ' library fastener' if fastener else '',
+                ' GROUNDED' if o.isGroundToParent else '',
+                ' at %s, %s, %s mm' % (mm(t.x), mm(t.y), mm(t.z)) if moved else ' at the origin'))
+            walk(o.childOccurrences, depth + 1)
+
+    walk(root.occurrences, 0)
     held = set()
     for label, joints in (('JOINTS', root.allJoints), ('AS-BUILT JOINTS', root.allAsBuiltJoints)):
         joints = list(joints)
@@ -160,7 +164,10 @@ def describe_assembly(des, out):
                 p = getattr(j, name, None)
                 if p is not None and p.expression.strip() not in ('0 mm', '0 cm', '0 in', '0 deg', '0.0 deg', '0.00 mm'):
                     bits.append('%s %s' % (name, p.expression))
-            out.append('  "%s": %s%s' % (j.name, '; '.join(bits), '' if j.healthState == 0 else '  ' + HEALTH.get(j.healthState, str(j.healthState))))
+            health = getattr(j, 'healthState', None)  # an as-built joint has none of its own
+            if health is None:
+                health = j.timelineObject.healthState
+            out.append('  "%s": %s%s' % (j.name, '; '.join(bits), '' if health == 0 else '  ' + HEALTH.get(health, str(health))))
     loose = [o.name for o in root.occurrences if not o.isGroundToParent and o.fullPathName not in held]
     if loose:
         out.append('HELD BY NOTHING: %s' % ', '.join('"%s"' % n for n in loose))
