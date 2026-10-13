@@ -32,6 +32,10 @@ quadrant), `addConcentricCircleDimension`.
 Set a value with `dim.parameter.expression = '12 mm'` or `= 'rail_h'`. Rename the dimension's
 own parameter with `dim.parameter.name = 'hook_reach'` when a person will look for it.
 
+`parameter.dependentParameters.count` is zero for a user parameter nothing uses, and
+`parameter.deleteMe()` removes it. Repeat until none goes: one unused parameter can be the only
+thing using another.
+
 ## Construction and reference geometry
 
 - `curve.isConstruction = True`, `line.isCenterLine = True`.
@@ -53,8 +57,8 @@ own parameter with `dim.parameter.name = 'hook_reach'` when a person will look f
   well as bodies. One kind of entity per collection.
 - `timelineGroups.add(startIndex, endIndex)` groups a contiguous run, and the group takes a
   `.name`. Groups do not nest. Add them last and from the end of the timeline backwards: each
-  one collapses its items into a single timeline entry and shifts every later index. A group
-  has no health of its own; read its items through `TimelineGroup.cast(item).item(i)`.
+  one collapses its items into a single timeline entry and shifts every later index. Set
+  `group.isCollapsed = False` on each once they are all made. A group has no health of its own; read its items through `TimelineGroup.cast(item).item(i)`.
 - A sketch, a plane and a feature each take their name from `.name`, which is also the
   timeline name. Names are unique: a feature given its sketch's name becomes `name (1)`, so
   name the sketch for the thing and the feature for the action (`hook`, `hook extrude`).

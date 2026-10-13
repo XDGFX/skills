@@ -168,22 +168,25 @@ def build_report(doc_name=None, pictures=None):
         out.append('  %s = %s  used %d times  # %s' % (p.name, p.expression, uses, p.comment))
 
     tl = des.timeline
+    # a collapsed group is one timeline entry holding its items; an expanded one is not an
+    # entry at all, and its items name it as their parent
     items = []
     for i in range(tl.count):
         item = tl.item(i)
         if item.isGroup:
             group = adsk.fusion.TimelineGroup.cast(item)
-            items.append((0, item))
-            items.extend((1, group.item(j)) for j in range(group.count))
+            items.extend((group.name + ' (collapsed)', group.item(j)) for j in range(group.count))
         else:
-            items.append((0, item))
-    out.append('TIMELINE %d items, %d of them groups' % (len(items), sum(1 for _, it in items if it.isGroup)))
+            items.append((item.parentGroup.name if item.parentGroup else None, item))
+    out.append('TIMELINE %d items in %d groups' % (len(items), tl.timelineGroups.count))
     sketches = []
-    for depth, item in items:
-        pad = '  ' * depth
-        if item.isGroup:
-            out.append('  [group] "%s"' % item.name)
-            continue
+    current = None
+    for group, item in items:
+        if group != current:
+            current = group
+            if group:
+                out.append('  [group] "%s"' % group)
+        pad = '  ' if group else ''
         try:
             ent = item.entity
         except RuntimeError:

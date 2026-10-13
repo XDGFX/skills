@@ -26,8 +26,8 @@ tool and the places the API behaves differently from the UI.
    part is located by. A symmetric part is centred on it. Use the back-bottom-left corner only
    for something with no datum, such as a piece of furniture.
 3. **The timeline reads logically.** Anything appears before what depends on it, and related
-   features sit together in a named group. There is no fixed order of stages, with one
-   exception: fillets and chamfers come after the geometry they round, and nothing references
+   features sit together in a named group, left expanded so the whole timeline is in view.
+   There is no fixed order of stages, with one exception: fillets and chamfers come after the geometry they round, and nothing references
    what they produce.
 4. **One idea per sketch and per feature.** A body, a hook and a row of holes are three sketches
    and three features, so changing the hook touches only the hook. Draw a compound outline only
@@ -66,7 +66,7 @@ tool and the places the API behaves differently from the UI.
 12. **A named parameter is for a value that is shared, measured, bought-in or a house
     default**: used by more than one feature, read off a real object, set by a fastener or a
     standard, or common to every part. Everything else is a plain number on the sketch.
-    A parameter names a size, never a coordinate.
+    A parameter names a size, never a coordinate, and one that nothing uses is removed.
 13. **The document owns the values.** A script adds the parameters that are missing and leaves
     the rest as it finds them, so a value tuned in Fusion survives a rebuild. It reports every
     parameter that differs from its own default.
