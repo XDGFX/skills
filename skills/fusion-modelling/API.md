@@ -143,10 +143,13 @@ for. They insert the first of each kind; Insert Similar does the rest.
   raises "this is not a parametric design". Check `design.designType`.
 - `materialLibrary.appearances.itemByName(name)` raises `invalid name` for a name that is not
   there, where most `itemByName` calls return `None`.
-- The MCP gives a script about a minute. A large assembly rebuild runs longer: build in stages,
-  one call each. After a timeout Fusion may still be working or waiting on a dialog, so check
-  with a small read-only script before sending anything else, and tell the user if it does not
-  answer.
+- The MCP call times out after a minute, and the script carries on running in Fusion. A
+  timeout is not a hang, and a call sent after it only queues behind the running script,
+  read-only ones included. Build a large assembly in stages, one call each. After a timeout,
+  wait, then send one small read-only script; if that times out too, Fusion is stuck or
+  waiting on a dialog, so stop and tell the user.
+- One session drives Fusion at a time. Two agents' scripts queue behind each other and neither
+  can tell whose call is stuck. If another session may be using Fusion, ask the user first.
 - Reported once and not confirmed: `occurrences.addByInsert` intermittently raising
   `InternalValidationError : group`, cured by running again; and Fusion hanging when a ball
   joint's yaw axis is changed on an existing joint.
