@@ -22,6 +22,14 @@ npx skills add xdgfx/skills@tracker-sweep
 Both were replaced by one `ferrule` skill, which lives with the renderer in
 [XDGFX/ferrule](https://github.com/XDGFX/ferrule) (`skills/ferrule`): `npx skills add xdgfx/ferrule@ferrule`.
 
+### fusion-modelling
+
+Rules for building Autodesk Fusion models the way a disciplined person would, so the result can be
+opened, read and changed by hand: the origin on a functional datum, native sketch tools, a few
+dimensions between the things they relate, named parameters only for shared or measured values,
+and holes and repeats as features. Carries the Fusion API call behind each tool, and a blind
+review in which a second agent reads the finished model without knowing what the part is.
+
 ### tracker-sweep
 
 Audit a GitHub issue tracker for staleness, wrong or missing blockers, duplicates, conflicting
