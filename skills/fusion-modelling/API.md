@@ -159,8 +159,15 @@ for. They insert the first of each kind; Insert Similar does the rest.
   read-only ones included. Build a large assembly in stages, one call each, and have a long
   script write its progress to a file, so it can be watched without sending Fusion anything.
   If the file stops moving, Fusion is stuck or waiting on a dialog: stop and tell the user.
-- One session drives Fusion at a time. Two agents' scripts queue behind each other and neither
-  can tell whose call is stuck. If another session may be using Fusion, ask the user first.
+- One session drives Fusion at a time, and two sessions' calls at once can swap each other's
+  output. The `fusion-gate` plugin enforces this with a hook on every Fusion call, so don't ask
+  other sessions whether Fusion is free. A call refused with "…your call was NOT run" never
+  reached Fusion; the refusal gives the `fusion_gate.py acquire` command that waits your turn.
+  Give it a reason and an estimate before a multi-step job, and run `release` once the work is
+  saved. Never save or close a document the gate lists. When the user wants Fusion to
+  themselves, `pause` and `resume` hand it over and back. Any installed copy of the script
+  reaches the same gate:
+  `python3 "$(ls -d ~/.claude/plugins/cache/xdgfx/fusion-gate/*/ | tail -1)fusion_gate.py" status`.
 - Reported once and not confirmed: `occurrences.addByInsert` intermittently raising
   `InternalValidationError : group`, cured by running again; and Fusion hanging when a ball
   joint's yaw axis is changed on an existing joint.

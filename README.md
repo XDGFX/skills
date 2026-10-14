@@ -31,6 +31,21 @@ holes and repeats as features, assemblies held by the joints the real thing has,
 from Fusion's library instead of modelled. Carries the Fusion API call behind each tool, and a blind
 review in which a second agent reads the finished model without knowing what the part is.
 
+### fusion-gate (plugin)
+
+Lets several agents share one Fusion. A hook on every `mcp__fusion360__*` call asks a small lock
+service for a turn. The service lets one call at a time through and lends the design to one session
+at a time. It keeps a queue that puts short reads first, notices when Fusion has crashed, and pauses
+agents while you use Fusion, resuming once you stop. The hook starts the service when it's first
+needed, and your MCP config is left alone.
+
+```
+/plugin install fusion-gate@xdgfx
+```
+
+Needs `uv`. Then `python3 <plugin>/fusion_gate.py status|pause|resume`, or ask any agent to pause
+Fusion for you.
+
 ### tracker-sweep
 
 Audit a GitHub issue tracker for staleness, wrong or missing blockers, duplicates, conflicting

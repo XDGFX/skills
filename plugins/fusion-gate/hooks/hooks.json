@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__fusion360__.*",
+        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook", "timeout": 90 }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__fusion360__.*",
+        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook", "timeout": 15 }]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "mcp__fusion360__.*",
+        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook", "timeout": 15 }]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook", "timeout": 5 }]
+      }
+    ]
+  }
+}
