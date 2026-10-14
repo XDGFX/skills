@@ -354,6 +354,22 @@ def test_restart_keeps_holders_and_the_queue(tmp_path):
     run(go())
 
 
+def test_holder_waiting_for_its_call_is_not_in_the_queue(tmp_path):
+    async def go():
+        gate = fg.Gate(FAST, state=tmp_path / "s.json")
+        await declare(gate, "a", "water_box")
+        await declare(gate, "b", "fan_shroud")
+        await gate.admit("a", "write", 1, call="long")
+        b_call = asyncio.ensure_future(gate.admit("b", "write", 2, call="next"))
+        await asyncio.sleep(0.01)
+        assert gate.queue() == []
+        gate.save()
+        assert fg.Gate(FAST, state=tmp_path / "s.json").queue() == []
+        gate.done("long")
+        assert await b_call is None
+    run(go())
+
+
 def test_service_turns_refusal_into_a_denying_hook():
     async def go():
         gate = fg.Gate(FAST)

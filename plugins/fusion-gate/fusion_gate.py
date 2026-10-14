@@ -151,11 +151,12 @@ class Gate:
         """Waiters between two acquire runs: nobody behind them is let in meanwhile."""
         now = time.monotonic()
         return {s: (rank, since) for s, (rank, since, left) in self.places.items()
-                if now - left < self.cfg.rejoin and s not in self.waiting}
+                if now - left < self.cfg.rejoin and s not in self.waiting and s not in self.leases}
 
     def queue(self) -> list[str]:
         now = time.monotonic()
-        entries = {**self.stepped_away(), **self.waiting}
+        waiting = {s: entry for s, entry in self.waiting.items() if s not in self.leases}  # not a holder mid-call
+        entries = {**self.stepped_away(), **waiting}
         return [s for s, _ in sorted(entries.items(), key=lambda i: self._key(i, now))]
 
     def _rank(self, session: str, kind: str) -> int:
@@ -441,7 +442,8 @@ class Gate:
                                                "until": lease.until + shift if lease.until else 0}
                   for lease in self.leases.values()]
         places = {s: (rank, since + shift, left + shift) for s, (rank, since, left) in self.places.items()}
-        places |= {s: (rank, since + shift, now) for s, (rank, since) in self.waiting.items()}
+        places |= {s: (rank, since + shift, now) for s, (rank, since) in self.waiting.items()
+                   if s not in self.leases}  # a holder mid-call isn't waiting
         data = {"protected": self.protected, "leases": leases, "places": places,
                 "intent": self.intent, "where": self.where}
         self.state.parent.mkdir(parents=True, exist_ok=True)
@@ -507,20 +509,24 @@ def refusal(gate: Gate, why: str, session: str) -> str:
 # --- the service ------------------------------------------------------------------------
 
 
-# Top-level code: the Fusion MCP runs a script's body and never calls run(context).
+# The result goes to a file: the Fusion MCP often returns a script's printed output as "".
 ACTIVATE_SCRIPT = """\
+import json
 import adsk.core
 
-app = adsk.core.Application.get()
-target = %r
-replaced = app.activeDocument.name if app.activeDocument else ''
-ok = False
-for doc in app.documents:
-    if doc.name == target or doc.name.rsplit(' v', 1)[0] == target:
-        ok = bool(doc.activate())
-        break
-print('FUSION_GATE|%%s|%%d' %% (replaced, ok))
+def run(_context: str):
+    app = adsk.core.Application.get()
+    target = %r
+    replaced = app.activeDocument.name if app.activeDocument else ''
+    ok = False
+    for doc in app.documents:
+        if doc.name == target or doc.name.rsplit(' v', 1)[0] == target:
+            ok = bool(doc.activate())
+            break
+    with open(%r, 'w') as f:
+        json.dump({'replaced': replaced, 'ok': ok}, f)
 """
+ACTIVATE_RESULT = Path.home() / ".cache" / "fusion-gate" / "activate.json"
 
 
 class Fusion:
@@ -555,11 +561,17 @@ class Fusion:
     async def activate(self, name: str) -> tuple[str, bool]:
         """Make the open document `name` active. Returns the one it replaced, and whether it worked."""
         started = time.monotonic()
-        text = await self._tool("fusion_mcp_execute", {"featureType": "script",
-                                                       "object": {"script": ACTIVATE_SCRIPT % name}})
-        m = re.search(r"FUSION_GATE\|(.*?)\|([01])", text)
-        log(f"activate {name}: {m.group(0) if m else text[:200]} in {time.monotonic() - started:.1f} s")
-        return (m.group(1), m.group(2) == "1") if m else ("", False)
+        ACTIVATE_RESULT.unlink(missing_ok=True)
+        text = await self._tool("fusion_mcp_execute", {"featureType": "script", "object": {
+            "script": ACTIVATE_SCRIPT % (name, str(ACTIVATE_RESULT))}})
+        try:
+            result = json.loads(ACTIVATE_RESULT.read_text())
+        except (OSError, ValueError):
+            log(f"activate {name}: no result; Fusion said {text[:300]}")
+            return "", False
+        log(f"activate {name}: replaced {result['replaced']!r}, ok={result['ok']}, "
+            f"{time.monotonic() - started:.1f} s")
+        return result["replaced"], bool(result["ok"])
 
 
 GATE = None  # aiohttp's AppKey, made with the app so the hook never imports aiohttp
