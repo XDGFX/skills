@@ -178,6 +178,34 @@ def test_first_call_of_a_lease_is_told_the_rules_once():
     run(go())
 
 
+def test_acquire_estimate_holds_the_lease_without_calls():
+    async def go():
+        gate = fg.Gate(FAST)
+        await gate.acquire("a", "water box pass", FAST.idle_explicit * 2 / 60, "")
+        await asyncio.sleep(FAST.idle_explicit + 0.05)
+        gate.tick()
+        assert gate.lease.session == "a"
+    run(go())
+
+
+def test_holder_is_not_told_to_keep_off_its_own_documents():
+    async def go():
+        gate = fg.Gate(FAST)
+        gate.protect("assy_office", "Cal's unsaved changes", False)
+        gate.protect("pelican", "water box work", False)
+        await gate.acquire("a", "water box pass", None, "pelican")
+        assert "assy_office" in gate._protected_line("a") and "pelican" not in gate._protected_line("a")
+        assert "pelican" in gate._protected_line("b")
+    run(go())
+
+
+def test_protected_list_survives_a_restart(tmp_path):
+    async def go():
+        fg.Gate(FAST, state=tmp_path / "s.json").protect("assy_office", "unsaved", False)
+        assert fg.Gate(FAST, state=tmp_path / "s.json").protected == {"assy_office": "unsaved"}
+    run(go())
+
+
 def test_service_turns_refusal_into_a_denying_hook():
     async def go():
         gate = fg.Gate(FAST)

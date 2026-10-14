@@ -90,6 +90,7 @@ class Lease:
     reason: str = ""
     documents: str = ""
     minutes: float | None = None
+    until: float = 0  # held regardless of calls until then: the estimate from the last acquire
     told: bool = False
     overrun_told: bool = False
 
@@ -101,7 +102,8 @@ class Pause:
 
 
 class Gate:
-    def __init__(self, config: Config | None = None, notify=lambda text: None, probe=None):
+    def __init__(self, config: Config | None = None, notify=lambda text: None, probe=None,
+                 state: Path | None = None):
         self.cfg = config or Config()
         self.notify = notify
         self.probe = probe  # returns once Fusion has finished whatever it is running
@@ -114,7 +116,10 @@ class Gate:
         self.places: dict[str, tuple[float, float]] = {}  # session -> (queued since, left at)
         self.intent: dict[str, dict] = {}  # session -> what acquire said
         self.where: dict[str, str] = {}  # session -> the project it runs in
+        self.state = state  # where the protected list survives a restart
         self.protected: dict[str, str] = {}  # document -> why
+        if state and state.exists():
+            self.protected = json.loads(state.read_text()).get("protected", {})
         self.last_cal_input = 0.0
         self._probing = False
         self._changed = asyncio.Event()
@@ -220,7 +225,7 @@ class Gate:
     def welcome(self, lease: Lease) -> str:
         return (f"fusion-gate: you hold Fusion until you run `python3 {SCRIPT} release` or make no Fusion "
                 f"call for {ago(lease.idle)}. The active document may be another agent's: activate yours "
-                f"and check app.activeDocument.name before changing anything.") + self._protected_line()
+                f"and check app.activeDocument.name before changing anything.") + self._protected_line(lease.session)
 
     def _grant(self, session: str) -> None:
         now = time.monotonic()
@@ -247,7 +252,8 @@ class Gate:
     def tick(self) -> None:
         now = time.monotonic()
         lease = self.lease
-        if lease and not self.busy(lease.session) and not self.pause and now - lease.last_call > lease.idle:
+        # An acquire's estimate holds the lease even without calls the hook can see.
+        if lease and now >= lease.until and not self.busy(lease.session) and not self.pause and now - lease.last_call > lease.idle:
             self.release(lease.session, f"no call for {ago(now - lease.last_call)}")
         if (lease and self.cfg.notify_overrun and lease.minutes and not lease.overrun_told
                 and now - lease.since > 1.5 * lease.minutes * 60):
@@ -315,6 +321,7 @@ class Gate:
                     f"Run the same command again.\n\n{self.status(session)}")
         lease = self.lease
         lease.reason, lease.minutes, lease.documents = reason, minutes, documents
+        lease.until = time.monotonic() + (minutes or 0) * 60
         lease.idle = max(lease.idle, self.cfg.idle_explicit)
         lease.last_call = time.monotonic()
         lease.told = True
@@ -330,10 +337,22 @@ class Gate:
         name = f"an agent in {where}" if where else f"agent {session[:4]}"
         return f"{name} ({reason})" if reason else name
 
-    def _protected_line(self) -> str:
-        if not self.protected:
+    def _protected_line(self, viewer: str | None = None) -> str:
+        lease = self.lease
+        own = lease.documents.casefold() if lease and lease.session == viewer else ""
+        shown = {d: why for d, why in self.protected.items() if d.casefold() not in own}
+        if not shown:
             return ""
-        return "\n\nNever save or close: " + "; ".join(f"{d} ({why})" for d, why in self.protected.items())
+        return "\n\nNever save or close: " + "; ".join(f"{d} ({why})" for d, why in shown.items())
+
+    def protect(self, document: str, reason: str, clear: bool) -> None:
+        if clear:
+            self.protected.pop(document, None)
+        else:
+            self.protected[document] = reason or "protected"
+        if self.state:
+            self.state.parent.mkdir(parents=True, exist_ok=True)
+            self.state.write_text(json.dumps({"protected": self.protected}))
 
     def status(self, viewer: str | None = None) -> str:
         now = time.monotonic()
@@ -359,7 +378,7 @@ class Gate:
         if self.waiting:
             queue = [self.describe(s, viewer) for s in self.queue()]
             lines.append("Waiting: " + ", ".join(f"{i}. {q}" for i, q in enumerate(queue, 1)))
-        return "\n".join(lines) + self._protected_line()
+        return "\n".join(lines) + self._protected_line(viewer)
 
 
 def refusal(gate: Gate, why: str, session: str) -> str:
@@ -437,11 +456,8 @@ async def handle(request):
         gate.resume("Cal")
         text = gate.status()
     elif op == "protect":
-        if body.get("clear"):
-            gate.protected.pop(body["document"], None)
-        else:
-            gate.protected[body["document"]] = body.get("reason") or "protected"
-        text = gate.status()
+        gate.protect(body["document"], body.get("reason", ""), bool(body.get("clear")))
+        text = gate.status(session)
     elif op == "status":
         text = gate.status(session)
     else:
@@ -522,7 +538,8 @@ def mac_notify(text: str) -> None:
 async def serve() -> None:
     from aiohttp import web
 
-    gate = Gate(Config(), notify=mac_notify, probe=Fusion(FUSION).wait_idle)
+    state = Path.home() / ".cache" / "fusion-gate" / "state.json"
+    gate = Gate(Config(), notify=mac_notify, probe=Fusion(FUSION).wait_idle, state=state)
     runner = web.AppRunner(make_app(gate))
     await runner.setup()
     try:
