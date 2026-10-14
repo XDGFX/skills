@@ -43,6 +43,7 @@ LOG = Path.home() / "Library" / "Logs" / "fusion-gate.log"
 @dataclasses.dataclass
 class Config:
     wait_block: float = 30  # a Fusion call waits this long for its turn, then is refused
+    holder_wait: float = 70  # a holder's call waits this long for another holder's call (under the hook's 90 s)
     acquire_wait: float = 100  # under the Bash tool's default 2 min limit
     idle_read: float = 30  # a lease ends after this long without a call
     idle_write: float = 300
@@ -494,9 +495,13 @@ class Gate:
 def refusal(gate: Gate, why: str, session: str) -> str:
     head = {
         "busy": "Fusion is in use by another agent",
+        "behind": "You still hold Fusion, but another agent's call has been running all this time",
         "paused": "Cal has taken over Fusion",
         "down": "Fusion isn't reachable; it may have crashed or been closed",
     }[why]
+    if why == "behind":
+        return (f"{head}, so your call was NOT run. Your lease is kept: send the same call again."
+                f"\n\n{gate.status(session)}")
     if why == "down":
         tail = "Don't retry in a loop. Tell Cal, or wait for Fusion with the command below."
     else:
@@ -587,7 +592,11 @@ async def handle(request):
         gate.where.setdefault(session, body["where"])
     ok, text = True, ""
     if op == "admit":
-        why = await gate.admit(session, body["kind"], gate.cfg.wait_block, call=body.get("call"))
+        holds = session in gate.leases
+        why = await gate.admit(session, body["kind"], gate.cfg.holder_wait if holds else gate.cfg.wait_block,
+                               call=body.get("call"))
+        if why == "busy" and session in gate.leases:
+            why = "behind"
         ok, text = why is None, refusal(gate, why, session) if why else ""
     elif op == "done":
         text = gate.done(body.get("call", ""))
@@ -751,7 +760,7 @@ def hook(event: dict) -> dict | None:
     if name == "PreToolUse":
         kind = classify(event.get("tool_name", ""), event.get("tool_input") or {})
         r = call({"op": "admit", "session": session, "where": where, "kind": kind,
-                  "call": event.get("tool_use_id")}, Config.wait_block + 15)
+                  "call": event.get("tool_use_id")}, max(Config.wait_block, Config.holder_wait) + 15)
         if r["ok"]:
             return None
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",

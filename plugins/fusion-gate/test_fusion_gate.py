@@ -370,6 +370,20 @@ def test_holder_waiting_for_its_call_is_not_in_the_queue(tmp_path):
     run(go())
 
 
+def test_holder_stuck_behind_another_call_is_told_it_still_holds():
+    async def go():
+        gate = fg.Gate(dataclasses.replace(FAST, holder_wait=0.1))
+        await declare(gate, "a", "water_box")
+        await declare(gate, "b", "fan_shroud")
+        await gate.admit("b", "write", 1, call="long")
+        async with TestClient(TestServer(fg.make_app(gate))) as client:
+            r = await client.post("/", json={"op": "admit", "session": "a", "kind": "write", "call": "x"})
+            body = await r.json()
+        assert body["ok"] is False and "Your lease is kept" in body["text"]
+        assert "a" in gate.leases
+    run(go())
+
+
 def test_service_turns_refusal_into_a_denying_hook():
     async def go():
         gate = fg.Gate(FAST)
