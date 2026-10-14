@@ -9,6 +9,11 @@
             "name": "xdgfx-skills",
             "source": "./",
             "description": "Ticket workflow, tracker sweeps and Notion work-journal skills."
+        },
+        {
+            "name": "fusion-gate",
+            "source": "./plugins/fusion-gate",
+            "description": "Agents take turns with Autodesk Fusion's MCP server."
         }
     ]
 }

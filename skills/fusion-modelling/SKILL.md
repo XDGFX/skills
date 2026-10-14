@@ -20,6 +20,9 @@ limits: when a rule and the stranger's convenience disagree, the stranger wins.
 Writing against the Fusion API: read [`API.md`](API.md) first, for the call behind each native
 tool and the places the API behaves differently from the UI.
 
+Other agents share Fusion through a queue (see the last rules in `API.md`). Activate your own
+document before changing anything: the active one may be another agent's.
+
 ## Structure
 
 1. **One component per part, created first.** Everything is built inside it. A document that
