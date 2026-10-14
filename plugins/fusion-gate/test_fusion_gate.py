@@ -276,14 +276,23 @@ def test_calls_stay_one_at_a_time_between_sharing_holders():
     run(go())
 
 
-def test_undeclared_session_needs_all_of_fusion():
+def test_undeclared_session_works_around_declared_holders():
     async def go():
         gate = fg.Gate(FAST)
-        await declare(gate, "a", "water_box")
-        assert await through(gate, "plain") == "busy"
-        gate.release("a", "test")
+        await declare(gate, "a", "water_box")  # e.g. idle, waiting for Cal
         assert await through(gate, "plain") is None
-        assert await declare(gate, "b", "fan_shroud") == "busy"
+        assert "water_box" in gate.welcome(gate.leases["plain"])
+        assert await through(gate, "other_plain") == "busy"  # two undeclared could collide
+    run(go())
+
+
+def test_undeclared_holder_is_told_of_a_new_reservation():
+    async def go():
+        gate = fg.Gate(FAST)
+        await through(gate, "plain")
+        await declare(gate, "b", "fan_shroud")
+        await gate.admit("plain", "write", 1, call="c")
+        assert "fan_shroud" in gate.done("c")
     run(go())
 
 
@@ -342,6 +351,7 @@ def test_restart_keeps_holders_and_the_queue(tmp_path):
         state = tmp_path / "s.json"
         gate = fg.Gate(FAST, state=state)
         await gate.acquire("a", "water box pass", 45, "water_box")
+        gate.intent["b"] = {"documents": "water_box"}
         waiting = asyncio.ensure_future(gate.admit("b", "write", 2))
         await asyncio.sleep(0.01)
         gate.tick()  # saves
@@ -349,6 +359,7 @@ def test_restart_keeps_holders_and_the_queue(tmp_path):
 
         again = fg.Gate(FAST, state=state)
         assert holder(again).session == "a" and holder(again).minutes == 45
+        again.intent["c"] = {"documents": "water_box"}
         assert await again.admit("c", "write", 0.05) == "busy"
         assert again.queue() == ["b", "c"]  # b keeps its place ahead of newcomers
     run(go())

@@ -221,27 +221,46 @@ class Gate:
             return None
         return document_set(self.intent.get(session, {}).get("documents"))
 
+    def _clash(self, a: str, b: str) -> bool:
+        """Declared sets clash when they overlap. A session that declared nothing works around
+        everyone's declared documents, but two of them can't tell whether they collide."""
+        mine, theirs = self.documents(a), self.documents(b)
+        if mine is None or theirs is None:
+            return mine is None and theirs is None
+        return bool(mine & theirs)
+
     def _may_grant(self, session: str) -> bool:
         """Free of every holder's documents and of every waiter's queued ahead of it."""
-        mine = self.documents(session)
         ahead = []
         for other in self.queue():
             if other == session:
                 break
             ahead.append(other)
-        for other in [*self.leases, *ahead]:
-            theirs = self.documents(other)
-            if mine is None or theirs is None or mine & theirs:
-                return False
-        return True
+        return not any(self._clash(session, other) for other in [*self.leases, *ahead])
+
+    def reserved(self, viewer: str) -> dict[str, str]:
+        """Documents other holders declared: document -> who holds it."""
+        return {d.strip(): self.describe(s) for s, lease in self.leases.items() if s != viewer
+                for d in lease.documents.split(",") if d.strip()}
+
+    def _reserved_line(self, viewer: str) -> str:
+        if not self.cfg.share or self.documents(viewer) is not None:
+            return ""  # a declared holder can't clash with anyone's reservations
+        shown = self.reserved(viewer)
+        if not shown:
+            return ""
+        return "\n\nOther agents hold these; don't open, change, save or close them: " + "; ".join(
+            f"{d} ({who})" for d, who in shown.items())
 
     async def _switch_to(self, session: str) -> None:
         """Before a sharing holder's call, give it back the document it had active."""
         previous, self.last_session = self.last_session, session
         lease = self.leases.get(session)
-        if not (self.activate and lease and previous not in (None, session) and lease.documents):
+        if not (self.activate and lease and previous not in (None, session)):
             return
         target = self.last_doc.get(session) or lease.documents.split(",")[0].strip()
+        if not target:
+            return  # declared nothing and hasn't been interrupted yet
         try:
             replaced, ok = await self.activate(target)
         except Exception as e:  # Fusion down: the port watcher handles it
@@ -297,10 +316,10 @@ class Gate:
                      f"Open or change only the documents you declared ({lease.documents}); to add one, run "
                      f"acquire again with the longer -d list.")
         else:
-            text += ("The active document may be another agent's: activate yours and check "
-                     "app.activeDocument.name before changing anything. Declaring your documents with "
-                     "acquire -d lets other agents work in theirs between your calls.")
-        return text + self._protected_line(lease.session)
+            text += ("Other agents' calls may run between yours, and the active document may be theirs: "
+                     "activate yours and check app.activeDocument.name before changing anything. Declare your "
+                     "documents with acquire -d so you know nobody else will touch them.")
+        return text + self._reserved_line(lease.session) + self._protected_line(lease.session)
 
     def _grant(self, session: str) -> None:
         now = time.monotonic()
@@ -308,6 +327,12 @@ class Gate:
                                      documents=self.intent.get(session, {}).get("documents") or "")
         self.places.pop(session, None)
         log(f"Fusion → {self.describe(session)}")
+        documents = self.leases[session].documents
+        if documents:  # holders that declared nothing must hear about the new reservation
+            for other, lease in self.leases.items():
+                if other != session and self.documents(other) is None:
+                    lease.notice = (f"fusion-gate: {self.describe(session)} now also holds Fusion; don't open, "
+                                    f"change, save or close {documents}.")
 
     def release(self, session: str, why: str) -> bool:
         if session not in self.leases:
@@ -489,7 +514,7 @@ class Gate:
         if queue:
             names = [self.describe(s, viewer) + (" (between retries)" if s in away else "") for s in queue]
             lines.append("Waiting: " + ", ".join(f"{i}. {q}" for i, q in enumerate(names, 1)))
-        return "\n".join(lines) + self._protected_line(viewer)
+        return "\n".join(lines) + (self._reserved_line(viewer) if viewer in self.leases else "") + self._protected_line(viewer)
 
 
 def refusal(gate: Gate, why: str, session: str) -> str:
