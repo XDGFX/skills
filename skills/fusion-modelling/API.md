@@ -159,12 +159,20 @@ for. They insert the first of each kind; Insert Similar does the rest.
   read-only ones included. Build a large assembly in stages, one call each, and have a long
   script write its progress to a file, so it can be watched without sending Fusion anything.
   If the file stops moving, Fusion is stuck or waiting on a dialog: stop and tell the user.
-- One session drives Fusion at a time, and two sessions' calls at once can swap each other's
+- Keep each call under a minute. Nothing else, yours or another agent's, runs while a call does,
+  and a call the client gave up on stays queued inside Fusion. So don't resend a call that
+  timed out, and scope every read to one document: a scan of every face in every open
+  document, followed by four retries, held Fusion for 35 minutes.
+- What a script prints often comes back as `"message": ""`. Write anything you need back to a
+  file and read that.
+- Fusion runs one call at a time, and two sessions' calls at once can swap each other's
   output. The `fusion-gate` plugin enforces this with a hook on every Fusion call, so don't ask
   other sessions whether Fusion is free. A call refused with "…your call was NOT run" never
   reached Fusion; the refusal gives the `fusion_gate.py acquire` command that waits your turn.
-  Give it a reason and an estimate before a multi-step job, and run `release` once the work is
-  saved. Never save or close a document the gate lists. When the user wants Fusion to
+  Before a multi-step job, run it with a reason, an estimate and `-d` listing every document
+  you will open, read or change: agents whose documents don't overlap take turns call by call,
+  and the gate makes your document active again before each of your calls. Run `release` once
+  the work is saved. Never save or close a document the gate lists. When the user wants Fusion to
   themselves, `pause` and `resume` hand it over and back. Any installed copy of the script
   reaches the same gate:
   `python3 "$(ls -d ~/.claude/plugins/cache/xdgfx/fusion-gate/*/ | tail -1)fusion_gate.py" status`.
