@@ -1,4 +1,4 @@
-# Claude Skills — xdgfx
+<h1><img src="assets/header.svg" alt="Claude Skills — xdgfx" width="100%"></h1>
 
 A collection of Claude Code skills.
 
