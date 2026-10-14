@@ -508,7 +508,11 @@ class Gate:
                 parts.append(f"expects {lease.minutes:g} min")
             parts.append("a call is running" if self.busy(lease.session) else f"last call {ago(now - lease.last_call)} ago")
             lines.append(", ".join(parts) + ".")
-        if not self.leases and not self.down and not self.pause:
+        if self.calls:
+            oldest = min(started for _, started in self.calls.values())
+            lines.append(f"Fusion has been running a call for {ago(now - oldest)}; every other call waits until it "
+                         f"finishes. Don't send more meanwhile: they queue inside Fusion.")
+        elif not self.leases and not self.down and not self.pause:
             lines.append("Fusion is free.")
         queue, away = self.queue(), self.stepped_away()
         if queue:
@@ -736,6 +740,9 @@ async def serve() -> None:
         log(f"port {PORT} is taken: another fusion-gate is already running")
         return
     log(f"fusion-gate on 127.0.0.1:{PORT}, watching {FUSION}")
+    # Fusion may still be running a call from before this start: hold everyone until it answers.
+    gate.calls["(unknown call from before the gate started)"] = ("", time.monotonic())
+    asyncio.ensure_future(gate._clear_stale(time.monotonic() + 1))
     await asyncio.gather(ticker(gate), watch_fusion(gate), watch_cal(gate))
 
 
