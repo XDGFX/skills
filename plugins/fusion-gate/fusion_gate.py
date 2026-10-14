@@ -49,6 +49,8 @@ class Config:
     idle_explicit: float = 600  # once the holder has said what it is doing
     ageing: float = 600  # a waiter this old goes to the front
     place_kept: float = 900  # a session that stopped waiting keeps its place this long
+    rejoin: float = 60  # and for this long nobody behind it is let in, so a re-run of acquire loses nothing
+    share: bool = os.environ.get("FUSION_GATE_SHARE", "1") != "0"  # agents in different documents interleave
     stale_call: float = 75  # Claude Code gives up on a call at 60 s; Fusion may still be running it
     manual_resume: float = 600  # Cal's pause ends after this long without touching Fusion
     auto_resume: float = 180
@@ -93,6 +95,13 @@ class Lease:
     until: float = 0  # held regardless of calls until then: the estimate from the last acquire
     told: bool = False
     overrun_told: bool = False
+    notice: str = ""  # told to the holder when its next call comes back
+
+
+def document_set(documents: str | None) -> frozenset | None:
+    """The documents a session declared, or None: it needs all of Fusion."""
+    names = frozenset(d.strip().casefold() for d in (documents or "").split(",") if d.strip())
+    return names or None
 
 
 @dataclasses.dataclass
@@ -103,23 +112,27 @@ class Pause:
 
 class Gate:
     def __init__(self, config: Config | None = None, notify=lambda text: None, probe=None,
-                 state: Path | None = None):
+                 state: Path | None = None, activate=None):
         self.cfg = config or Config()
         self.notify = notify
         self.probe = probe  # returns once Fusion has finished whatever it is running
-        self.lease: Lease | None = None
+        self.activate = activate  # makes a document active; returns (the one it replaced, success)
+        # Holders: several when each declared documents no other holder declared.
+        self.leases: dict[str, Lease] = {}
+        self.last_session: str | None = None  # whose call Fusion ran last
+        self.last_doc: dict[str, str] = {}  # session -> the document it had active when interrupted
         self.pause: Pause | None = None
         self.down = False
         self.calls: dict[str, tuple[str, float]] = {}  # call in Fusion -> (session, started)
         self.waiting: dict[str, tuple[int, float]] = {}  # session -> (rank, queued since)
         self._refs: dict[str, int] = {}  # concurrent waits per session
-        self.places: dict[str, tuple[float, float]] = {}  # session -> (queued since, left at)
+        self.places: dict[str, tuple[int, float, float]] = {}  # session -> (rank, queued since, left at)
         self.intent: dict[str, dict] = {}  # session -> what acquire said
         self.where: dict[str, str] = {}  # session -> the project it runs in
-        self.state = state  # where the protected list survives a restart
+        self.state = state  # where protections, holders and the queue survive a restart
         self.protected: dict[str, str] = {}  # document -> why
         if state and state.exists():
-            self.protected = json.loads(state.read_text()).get("protected", {})
+            self._restore(json.loads(state.read_text()))
         self.last_cal_input = 0.0
         self._probing = False
         self._changed = asyncio.Event()
@@ -134,9 +147,16 @@ class Gate:
         rank, since = item[1]
         return (0 if now - since >= self.cfg.ageing else rank, since)
 
+    def stepped_away(self) -> dict[str, tuple[int, float]]:
+        """Waiters between two acquire runs: nobody behind them is let in meanwhile."""
+        now = time.monotonic()
+        return {s: (rank, since) for s, (rank, since, left) in self.places.items()
+                if now - left < self.cfg.rejoin and s not in self.waiting}
+
     def queue(self) -> list[str]:
         now = time.monotonic()
-        return [s for s, _ in sorted(self.waiting.items(), key=lambda i: self._key(i, now))]
+        entries = {**self.stepped_away(), **self.waiting}
+        return [s for s, _ in sorted(entries.items(), key=lambda i: self._key(i, now))]
 
     def _rank(self, session: str, kind: str) -> int:
         if kind == "read":
@@ -159,7 +179,8 @@ class Gate:
         if session in self.waiting:
             rank, since = min(rank, self.waiting[session][0]), self.waiting[session][1]
         else:
-            since, left = self.places.pop(session, (now, now))
+            kept_rank, since, left = self.places.pop(session, (rank, now, now))
+            rank = min(rank, kept_rank)
             if now - left >= self.cfg.place_kept:
                 since = now
         self.waiting[session] = (rank, since)
@@ -168,25 +189,67 @@ class Gate:
         def turn():
             if self.pause or self.down or (call and self.calls):
                 return False
-            if self.lease is None and self.queue()[0] == session:
+            if session not in self.leases and self._may_grant(session):
                 self._grant(session)
-            if not (self.lease and self.lease.session == session):
+            lease = self.leases.get(session)
+            if not lease:
                 return False
             idle = self.cfg.idle_read if kind == "read" else self.cfg.idle_write
-            self.lease.idle = max(self.lease.idle, idle)
+            lease.idle = max(lease.idle, idle)
             self._start(call, session)
             return True
 
         try:
-            return await self._wait(timeout, through_down, turn)
+            why = await self._wait(timeout, through_down, turn)
         finally:
             self._refs[session] -= 1
             if not self._refs[session]:
                 del self._refs[session]
-                _, since = self.waiting.pop(session)
-                if not (self.lease and self.lease.session == session):
-                    self.places[session] = (since, time.monotonic())
+                rank, since = self.waiting.pop(session)
+                if session not in self.leases:
+                    self.places[session] = (rank, since, time.monotonic())
                 self._poke()
+        if why is None and call:
+            await self._switch_to(session)
+        return why
+
+    def documents(self, session: str) -> frozenset | None:
+        """What `session` may share Fusion around; None when it needs all of Fusion."""
+        if not self.cfg.share:
+            return None
+        return document_set(self.intent.get(session, {}).get("documents"))
+
+    def _may_grant(self, session: str) -> bool:
+        """Free of every holder's documents and of every waiter's queued ahead of it."""
+        mine = self.documents(session)
+        ahead = []
+        for other in self.queue():
+            if other == session:
+                break
+            ahead.append(other)
+        for other in [*self.leases, *ahead]:
+            theirs = self.documents(other)
+            if mine is None or theirs is None or mine & theirs:
+                return False
+        return True
+
+    async def _switch_to(self, session: str) -> None:
+        """Before a sharing holder's call, give it back the document it had active."""
+        previous, self.last_session = self.last_session, session
+        lease = self.leases.get(session)
+        if not (self.activate and lease and previous not in (None, session) and lease.documents):
+            return
+        target = self.last_doc.get(session) or lease.documents.split(",")[0].strip()
+        try:
+            replaced, ok = await self.activate(target)
+        except Exception as e:  # Fusion down: the port watcher handles it
+            replaced, ok = "", False
+            log(f"activating {target} failed: {e}")
+        if replaced and previous in self.leases:
+            self.last_doc[previous] = replaced
+        if not ok:
+            lease.notice = (f"fusion-gate: another agent ran a call in between and the gate couldn't make "
+                            f"{target} active again. Activate your document before carrying on.")
 
     def _slot(self, call, session) -> bool:
         if self.down or self.calls:
@@ -212,32 +275,44 @@ class Gate:
     def done(self, call: str) -> str:
         """A call has come back. Returns what the holder should be told on its first call."""
         session, _ = self.calls.pop(call, (None, 0))
-        lease = self.lease
+        lease = self.leases.get(session)
         self._poke()
-        if not (lease and lease.session == session):
+        if not lease:
             return ""
         lease.last_call = time.monotonic()
+        notice, lease.notice = lease.notice, ""
         if lease.told:
-            return ""
+            return notice
         lease.told = True
-        return self.welcome(lease)
+        return "\n\n".join(filter(None, [self.welcome(lease), notice]))
 
     def welcome(self, lease: Lease) -> str:
-        return (f"fusion-gate: you hold Fusion until you run `python3 {SCRIPT} release` or make no Fusion "
-                f"call for {ago(lease.idle)}. The active document may be another agent's: activate yours "
-                f"and check app.activeDocument.name before changing anything.") + self._protected_line(lease.session)
+        text = (f"fusion-gate: you hold Fusion until you run `python3 {SCRIPT} release` or make no Fusion "
+                f"call for {ago(lease.idle)}. ")
+        if self.documents(lease.session):
+            text += (f"You share Fusion with agents working in other documents, so their calls may run between "
+                     f"yours. Before each of your calls the gate makes active the document you last had active. "
+                     f"Open or change only the documents you declared ({lease.documents}); to add one, run "
+                     f"acquire again with the longer -d list.")
+        else:
+            text += ("The active document may be another agent's: activate yours and check "
+                     "app.activeDocument.name before changing anything. Declaring your documents with "
+                     "acquire -d lets other agents work in theirs between your calls.")
+        return text + self._protected_line(lease.session)
 
     def _grant(self, session: str) -> None:
         now = time.monotonic()
-        self.lease = Lease(session, idle=self.cfg.idle_read, since=now, last_call=now)
+        self.leases[session] = Lease(session, idle=self.cfg.idle_read, since=now, last_call=now,
+                                     documents=self.intent.get(session, {}).get("documents") or "")
         self.places.pop(session, None)
         log(f"Fusion → {self.describe(session)}")
 
     def release(self, session: str, why: str) -> bool:
-        if not (self.lease and self.lease.session == session):
+        if session not in self.leases:
             return False
         log(f"{self.describe(session)} let go of Fusion: {why}")
-        self.lease = None
+        del self.leases[session]
+        self.last_doc.pop(session, None)
         self._poke()
         return True
 
@@ -251,21 +326,24 @@ class Gate:
 
     def tick(self) -> None:
         now = time.monotonic()
-        lease = self.lease
-        # An acquire's estimate holds the lease even without calls the hook can see.
-        if lease and now >= lease.until and not self.busy(lease.session) and not self.pause and now - lease.last_call > lease.idle:
-            self.release(lease.session, f"no call for {ago(now - lease.last_call)}")
-        if (lease and self.cfg.notify_overrun and lease.minutes and not lease.overrun_told
-                and now - lease.since > 1.5 * lease.minutes * 60):
-            lease.overrun_told = True
-            self.notify(f"{self.describe(lease.session)} has held Fusion for {ago(now - lease.since)}, "
-                        f"over its {lease.minutes:g} min estimate.")
+        for lease in list(self.leases.values()):
+            # An acquire's estimate holds the lease even without calls the hook can see.
+            if now >= lease.until and not self.busy(lease.session) and not self.pause and now - lease.last_call > lease.idle:
+                self.release(lease.session, f"no call for {ago(now - lease.last_call)}")
+            if (self.cfg.notify_overrun and lease.minutes and not lease.overrun_told
+                    and now - lease.since > 1.5 * lease.minutes * 60):
+                lease.overrun_told = True
+                self.notify(f"{self.describe(lease.session)} has held Fusion for {ago(now - lease.since)}, "
+                            f"over its {lease.minutes:g} min estimate.")
         if self.probe and not self._probing and any(now - t > self.cfg.stale_call for _, t in self.calls.values()):
             self._probing = True
             asyncio.ensure_future(self._clear_stale(now))
-        for session, (_, left) in list(self.places.items()):
+        for session, (_, _, left) in list(self.places.items()):
             if now - left >= self.cfg.place_kept:
                 del self.places[session]
+        if self.waiting and self.places:
+            self._poke()  # a waiter that stepped away may have run out of time to come back
+        self.save()
 
     async def _clear_stale(self, now: float) -> None:
         """The agent gave up on a call but Fusion is still running it: wait for Fusion to finish."""
@@ -287,7 +365,9 @@ class Gate:
             return
         self.down = down
         if down:
-            self.lease = None
+            self.leases.clear()
+            self.last_doc.clear()
+            self.last_session = None
             self.calls.clear()
             log("Fusion is unreachable")
             self.notify("Fusion stopped responding. Agents have been told to stop and wait.")
@@ -307,8 +387,8 @@ class Gate:
         if not self.pause:
             return
         self.pause = None
-        if self.lease:
-            self.lease.last_call = time.monotonic()
+        for lease in self.leases.values():
+            lease.last_call = time.monotonic()
         log(f"resumed: {why}")
         self._poke()
 
@@ -316,10 +396,11 @@ class Gate:
         self.intent[session] = {"reason": reason, "minutes": minutes, "documents": documents}
         why = await self.admit(session, "write", self.cfg.acquire_wait, through_down=True)
         if why:
-            place = self.queue().index(session) + 1 if session in self.waiting else None
+            queue = self.queue()
+            place = queue.index(session) + 1 if session in queue else None
             return (f"Not your turn yet{f' (you are #{place})' if place else ''}; your place is kept. "
                     f"Run the same command again.\n\n{self.status(session)}")
-        lease = self.lease
+        lease = self.leases[session]
         lease.reason, lease.minutes, lease.documents = reason, minutes, documents
         lease.until = time.monotonic() + (minutes or 0) * 60
         lease.idle = max(lease.idle, self.cfg.idle_explicit)
@@ -338,8 +419,7 @@ class Gate:
         return f"{name} ({reason})" if reason else name
 
     def _protected_line(self, viewer: str | None = None) -> str:
-        lease = self.lease
-        own = lease.documents.casefold() if lease and lease.session == viewer else ""
+        own = document_set(self.leases[viewer].documents) or frozenset() if viewer in self.leases else frozenset()
         shown = {d: why for d, why in self.protected.items() if d.casefold() not in own}
         if not shown:
             return ""
@@ -350,9 +430,38 @@ class Gate:
             self.protected.pop(document, None)
         else:
             self.protected[document] = reason or "protected"
-        if self.state:
-            self.state.parent.mkdir(parents=True, exist_ok=True)
-            self.state.write_text(json.dumps({"protected": self.protected}))
+        self.save()
+
+    def save(self) -> None:
+        """Write what a restart must not lose. Times are stored as wall-clock times."""
+        if not self.state:
+            return
+        now, shift = time.time(), time.time() - time.monotonic()
+        leases = [dataclasses.asdict(lease) | {"since": lease.since + shift, "last_call": lease.last_call + shift,
+                                               "until": lease.until + shift if lease.until else 0}
+                  for lease in self.leases.values()]
+        places = {s: (rank, since + shift, left + shift) for s, (rank, since, left) in self.places.items()}
+        places |= {s: (rank, since + shift, now) for s, (rank, since) in self.waiting.items()}
+        data = {"protected": self.protected, "leases": leases, "places": places,
+                "intent": self.intent, "where": self.where}
+        self.state.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(self.state)
+
+    def _restore(self, data: dict) -> None:
+        shift = time.time() - time.monotonic()
+        self.protected = data.get("protected", {})
+        self.intent = data.get("intent", {})
+        self.where = data.get("where", {})
+        for fields in data.get("leases", []):
+            lease = Lease(**fields)
+            lease.since -= shift
+            lease.last_call -= shift
+            lease.until = lease.until - shift if lease.until else 0
+            self.leases[lease.session] = lease
+        # Those waiting when the gate stopped come back as between retries: their place is kept.
+        self.places = {s: (rank, since - shift, left - shift) for s, (rank, since, left) in data.get("places", {}).items()}
 
     def status(self, viewer: str | None = None) -> str:
         now = time.monotonic()
@@ -364,20 +473,19 @@ class Gate:
             who = "Cal is using Fusion" if self.pause.auto else "Cal has taken over Fusion"
             lines.append(f"Paused for {ago(now - self.pause.since)}: {who}. Agents resume once Cal "
                          f"hasn't touched Fusion for {ago(limit)}.")
-        lease = self.lease
-        if lease:
+        for lease in self.leases.values():
             parts = [f"Held by {self.describe(lease.session, viewer)} for {ago(now - lease.since)}"]
-            if lease.documents:
-                parts.append(f"documents: {lease.documents}")
+            parts.append(f"documents: {lease.documents}" if lease.documents else "all of Fusion")
             if lease.minutes:
                 parts.append(f"expects {lease.minutes:g} min")
             parts.append("a call is running" if self.busy(lease.session) else f"last call {ago(now - lease.last_call)} ago")
             lines.append(", ".join(parts) + ".")
-        elif not self.down and not self.pause:
+        if not self.leases and not self.down and not self.pause:
             lines.append("Fusion is free.")
-        if self.waiting:
-            queue = [self.describe(s, viewer) for s in self.queue()]
-            lines.append("Waiting: " + ", ".join(f"{i}. {q}" for i, q in enumerate(queue, 1)))
+        queue, away = self.queue(), self.stepped_away()
+        if queue:
+            names = [self.describe(s, viewer) + (" (between retries)" if s in away else "") for s in queue]
+            lines.append("Waiting: " + ", ".join(f"{i}. {q}" for i, q in enumerate(names, 1)))
         return "\n".join(lines) + self._protected_line(viewer)
 
 
@@ -399,12 +507,27 @@ def refusal(gate: Gate, why: str, session: str) -> str:
 # --- the service ------------------------------------------------------------------------
 
 
+ACTIVATE_SCRIPT = """\
+import adsk.core
+
+def run(context):
+    app = adsk.core.Application.get()
+    target = %r
+    replaced = app.activeDocument.name if app.activeDocument else ''
+    ok = False
+    for doc in app.documents:
+        if doc.name == target or doc.name.rsplit(' v', 1)[0] == target:
+            ok = bool(doc.activate())
+            break
+    print('FUSION_GATE|%%s|%%d' %% (replaced, ok))
+"""
+
+
 class Fusion:
-    """Fusion's own MCP server, used only to find out when it has finished a call."""
+    """Fusion's own MCP server, for the gate's own calls: waiting for Fusion and switching documents."""
 
     def __init__(self, url: str):
         self.url = url
-        self.sid: str | None = None
 
     async def _post(self, http, msg: dict, sid: str | None = None):
         headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -413,17 +536,30 @@ class Fusion:
         async with http.post(self.url, json=msg, headers=headers) as r:
             return r.headers.get("Mcp-Session-Id"), await r.text()
 
-    async def wait_idle(self) -> None:
+    async def _tool(self, name: str, arguments: dict) -> str:
         import aiohttp
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=5)) as http:
             hello = {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fusion-gate", "version": "1"}}
             sid, _ = await self._post(http, {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": hello})
             await self._post(http, {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
-            # Any tool call queues behind whatever Fusion is running; this one is cheap.
-            lookup = {"queryType": "apiDocumentation", "searchPattern": "^Application$", "apiCategory": "class"}
-            await self._post(http, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                    "params": {"name": "fusion_mcp_read", "arguments": lookup}}, sid)
+            _, text = await self._post(http, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                              "params": {"name": name, "arguments": arguments}}, sid)
+            return text
+
+    async def wait_idle(self) -> None:
+        # Any tool call queues behind whatever Fusion is running; this one is cheap.
+        await self._tool("fusion_mcp_read", {"queryType": "apiDocumentation", "searchPattern": "^Application$",
+                                             "apiCategory": "class"})
+
+    async def activate(self, name: str) -> tuple[str, bool]:
+        """Make the open document `name` active. Returns the one it replaced, and whether it worked."""
+        started = time.monotonic()
+        text = await self._tool("fusion_mcp_execute", {"featureType": "script",
+                                                       "object": {"script": ACTIVATE_SCRIPT % name}})
+        m = re.search(r"FUSION_GATE\|(.*?)\|([01])", text)
+        log(f"activate {name}: {m.group(0) if m else text[:200]} in {time.monotonic() - started:.1f} s")
+        return (m.group(1), m.group(2) == "1") if m else ("", False)
 
 
 GATE = None  # aiohttp's AppKey, made with the app so the hook never imports aiohttp
@@ -458,6 +594,11 @@ async def handle(request):
     elif op == "protect":
         gate.protect(body["document"], body.get("reason", ""), bool(body.get("clear")))
         text = gate.status(session)
+    elif op == "share":
+        gate.cfg.share = bool(body.get("on"))
+        log(f"sharing between documents {'on' if gate.cfg.share else 'off'}")
+        gate._poke()
+        text = f"Sharing between documents is {'on' if gate.cfg.share else 'off'}.\n\n{gate.status(session)}"
     elif op == "status":
         text = gate.status(session)
     else:
@@ -539,7 +680,8 @@ async def serve() -> None:
     from aiohttp import web
 
     state = Path.home() / ".cache" / "fusion-gate" / "state.json"
-    gate = Gate(Config(), notify=mac_notify, probe=Fusion(FUSION).wait_idle, state=state)
+    fusion = Fusion(FUSION)
+    gate = Gate(Config(), notify=mac_notify, probe=fusion.wait_idle, state=state, activate=fusion.activate)
     runner = web.AppRunner(make_app(gate))
     await runner.setup()
     try:
@@ -625,6 +767,8 @@ def main() -> None:
     protect.add_argument("document")
     protect.add_argument("reason", nargs="?", default="")
     protect.add_argument("--clear", action="store_true")
+    share = sub.add_parser("share", help="let agents in different documents take turns call by call")
+    share.add_argument("state", choices=["on", "off"])
     for name in ("release", "status", "pause", "resume"):
         sub.add_parser(name)
     args = parser.parse_args()
@@ -647,6 +791,8 @@ def main() -> None:
         payload |= {"reason": args.reason, "minutes": args.minutes, "documents": args.documents}
     if args.command == "protect":
         payload |= {"document": args.document, "reason": args.reason, "clear": args.clear}
+    if args.command == "share":
+        payload["on"] = args.state == "on"
     print(call(payload, Config.acquire_wait + 15)["text"])
 
 

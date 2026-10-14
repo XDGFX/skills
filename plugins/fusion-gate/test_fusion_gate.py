@@ -1,6 +1,7 @@
 """Tests for fusion_gate. Run: uv run --with aiohttp --with pytest pytest plugins/fusion-gate"""
 
 import asyncio
+import dataclasses
 import itertools
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -14,6 +15,12 @@ ids = (f"call{i}" for i in itertools.count())
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def holder(gate):
+    """The only lease, or None."""
+    assert len(gate.leases) <= 1
+    return next(iter(gate.leases.values()), None)
 
 
 async def through(gate, session, kind="write", timeout=None):
@@ -39,7 +46,7 @@ def test_second_session_is_refused_while_first_holds():
         gate = fg.Gate(FAST)
         assert await through(gate, "a") is None
         assert await through(gate, "b") == "busy"
-        assert gate.lease.session == "a"
+        assert holder(gate).session == "a"
     run(go())
 
 
@@ -52,7 +59,7 @@ def test_one_call_at_a_time_even_without_a_lease():
         assert not docs.done()  # waits for a's call, not for a's lease
         gate.done("long")
         assert await docs is None
-        assert gate.lease.session == "a"
+        assert holder(gate).session == "a"
     run(go())
 
 
@@ -62,7 +69,7 @@ def test_lease_ends_after_idle_and_passes_on():
         await through(gate, "a")
         await asyncio.sleep(FAST.idle_write + 0.05)
         gate.tick()
-        assert gate.lease is None
+        assert holder(gate) is None
         assert await through(gate, "b") is None
     run(go())
 
@@ -71,10 +78,10 @@ def test_writer_keeps_the_lease_longer_than_a_reader():
     async def go():
         gate = fg.Gate(FAST)
         await through(gate, "reader", kind="read")
-        assert gate.lease.idle == FAST.idle_read
+        assert holder(gate).idle == FAST.idle_read
         gate.release("reader", "test")
         await through(gate, "writer")
-        assert gate.lease.idle == FAST.idle_write
+        assert holder(gate).idle == FAST.idle_write
     run(go())
 
 
@@ -84,7 +91,7 @@ def test_running_call_keeps_the_lease_past_idle():
         await gate.admit("a", "write", 1, call="rebuild")
         await asyncio.sleep(FAST.idle_write + 0.05)
         gate.tick()
-        assert gate.lease.session == "a"
+        assert holder(gate).session == "a"
     run(go())
 
 
@@ -98,7 +105,7 @@ def test_reader_goes_before_earlier_writer():
         await asyncio.sleep(0.01)
         gate.release("a", "test")
         assert await reader is None
-        assert gate.lease.session == "r"
+        assert holder(gate).session == "r"
         gate.release("r", "test")
         assert await writer is None
     run(go())
@@ -131,7 +138,7 @@ def test_pause_holds_even_the_holder_until_resume():
         await asyncio.sleep(0.01)
         gate.resume("test")
         assert await waiting is None
-        assert gate.lease.session == "a"
+        assert holder(gate).session == "a"
     run(go())
 
 
@@ -140,13 +147,13 @@ def test_fusion_down_clears_everything_and_refuses():
         gate = fg.Gate(FAST)
         await gate.admit("a", "write", 1, call="lost")
         gate.set_down(True)
-        assert gate.lease is None and not gate.calls
+        assert holder(gate) is None and not gate.calls
         assert await through(gate, "b", timeout=1) == "down"
         back = asyncio.ensure_future(gate.acquire("b", "rebuild", 5, ""))
         await asyncio.sleep(0.01)
         gate.set_down(False)
         await back
-        assert gate.lease.session == "b"
+        assert holder(gate).session == "b"
     run(go())
 
 
@@ -184,7 +191,7 @@ def test_acquire_estimate_holds_the_lease_without_calls():
         await gate.acquire("a", "water box pass", FAST.idle_explicit * 2 / 60, "")
         await asyncio.sleep(FAST.idle_explicit + 0.05)
         gate.tick()
-        assert gate.lease.session == "a"
+        assert holder(gate).session == "a"
     run(go())
 
 
@@ -203,6 +210,147 @@ def test_protected_list_survives_a_restart(tmp_path):
     async def go():
         fg.Gate(FAST, state=tmp_path / "s.json").protect("assy_office", "unsaved", False)
         assert fg.Gate(FAST, state=tmp_path / "s.json").protected == {"assy_office": "unsaved"}
+    run(go())
+
+
+def test_waiter_between_acquire_runs_is_not_overtaken():
+    async def go():
+        gate = fg.Gate(FAST)
+        await through(gate, "a")
+        assert await gate.admit("b", "write", 0.05) == "busy"  # b's acquire run ended; it will run again
+        late = asyncio.ensure_future(gate.admit("c", "write", 2))
+        gate.release("a", "test")
+        await asyncio.sleep(0.05)
+        assert not late.done() and gate.queue() == ["b", "c"]
+        assert await gate.admit("b", "write", 1) is None
+        gate.release("b", "test")
+        assert await late is None
+    run(go())
+
+
+def test_waiter_that_never_comes_back_stops_blocking():
+    async def go():
+        gate = fg.Gate(dataclasses.replace(FAST, rejoin=0.1))
+        await through(gate, "a")
+        assert await gate.admit("b", "write", 0.05) == "busy"
+        late = asyncio.ensure_future(gate.admit("c", "write", 2))
+        gate.release("a", "test")
+        await asyncio.sleep(0.15)
+        gate.tick()
+        assert await late is None
+    run(go())
+
+
+async def declare(gate, session, documents):
+    gate.intent[session] = {"reason": session, "minutes": None, "documents": documents}
+    return await through(gate, session)
+
+
+def test_agents_in_different_documents_hold_fusion_together():
+    async def go():
+        gate = fg.Gate(FAST)
+        assert await declare(gate, "a", "water_box") is None
+        assert await declare(gate, "b", "fan_shroud, assy_electrical") is None
+        assert set(gate.leases) == {"a", "b"}
+        assert await declare(gate, "c", "ASSY_ELECTRICAL") == "busy"  # names match without case
+    run(go())
+
+
+def test_sharing_off_makes_every_holder_exclusive():
+    async def go():
+        gate = fg.Gate(dataclasses.replace(FAST, share=False))
+        assert await declare(gate, "a", "water_box") is None
+        assert await declare(gate, "b", "fan_shroud") == "busy"
+    run(go())
+
+
+def test_calls_stay_one_at_a_time_between_sharing_holders():
+    async def go():
+        gate = fg.Gate(FAST)
+        await declare(gate, "a", "water_box")
+        await declare(gate, "b", "fan_shroud")
+        assert await gate.admit("a", "write", 1, call="long") is None
+        assert await gate.admit("b", "write", 0.05, call="next") == "busy"
+        gate.done("long")
+        assert await gate.admit("b", "write", 1, call="next") is None
+    run(go())
+
+
+def test_undeclared_session_needs_all_of_fusion():
+    async def go():
+        gate = fg.Gate(FAST)
+        await declare(gate, "a", "water_box")
+        assert await through(gate, "plain") == "busy"
+        gate.release("a", "test")
+        assert await through(gate, "plain") is None
+        assert await declare(gate, "b", "fan_shroud") == "busy"
+    run(go())
+
+
+def test_waiter_is_not_overtaken_on_a_document_it_wants():
+    async def go():
+        gate = fg.Gate(FAST)
+        await declare(gate, "a", "x")
+        gate.intent["b"] = {"documents": "x"}
+        first = asyncio.ensure_future(gate.admit("b", "write", 2))
+        await asyncio.sleep(0.01)
+        assert await declare(gate, "c", "x, y") == "busy"  # b queued for x first
+        assert await declare(gate, "d", "z") is None  # nobody wants z
+        gate.release("a", "test")
+        assert await first is None
+    run(go())
+
+
+def test_each_holder_gets_its_own_document_back():
+    async def go():
+        active = ["water_box v3"]
+        switches = []
+
+        async def activate(name):
+            switches.append(name)
+            replaced, active[0] = active[0], name
+            return replaced, True
+
+        gate = fg.Gate(FAST, activate=activate)
+        await declare(gate, "a", "water_box")
+        await declare(gate, "b", "fan_shroud")
+        active[0] = "new_part"  # b's script opened a new document and left it active
+        await through(gate, "a")
+        await through(gate, "b")
+        # b starts on its first declared document; each then gets back what it had active
+        assert switches == ["fan_shroud", "water_box v3", "new_part"]
+    run(go())
+
+
+def test_holder_is_warned_when_its_document_cannot_be_restored():
+    async def go():
+        async def activate(name):
+            return "water_box", name != "water_box"  # water_box has been closed
+
+        gate = fg.Gate(FAST, activate=activate)
+        await declare(gate, "a", "water_box")
+        await declare(gate, "b", "fan_shroud")
+        await gate.admit("a", "write", 1, call="c1")
+        assert "couldn't make water_box active" in gate.done("c1")
+        await through(gate, "b")
+        assert gate.done("none") == ""  # the warning went to a only
+    run(go())
+
+
+def test_restart_keeps_holders_and_the_queue(tmp_path):
+    async def go():
+        state = tmp_path / "s.json"
+        gate = fg.Gate(FAST, state=state)
+        await gate.acquire("a", "water box pass", 45, "water_box")
+        waiting = asyncio.ensure_future(gate.admit("b", "write", 2))
+        await asyncio.sleep(0.01)
+        gate.tick()  # saves
+        waiting.cancel()
+
+        again = fg.Gate(FAST, state=state)
+        assert holder(again).session == "a" and holder(again).minutes == 45
+        assert await again.admit("c", "write", 0.05) == "busy"
+        assert again.queue() == ["b", "c"]  # b keeps its place ahead of newcomers
     run(go())
 
 
