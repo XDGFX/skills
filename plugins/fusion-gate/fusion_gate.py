@@ -507,19 +507,19 @@ def refusal(gate: Gate, why: str, session: str) -> str:
 # --- the service ------------------------------------------------------------------------
 
 
+# Top-level code: the Fusion MCP runs a script's body and never calls run(context).
 ACTIVATE_SCRIPT = """\
 import adsk.core
 
-def run(context):
-    app = adsk.core.Application.get()
-    target = %r
-    replaced = app.activeDocument.name if app.activeDocument else ''
-    ok = False
-    for doc in app.documents:
-        if doc.name == target or doc.name.rsplit(' v', 1)[0] == target:
-            ok = bool(doc.activate())
-            break
-    print('FUSION_GATE|%%s|%%d' %% (replaced, ok))
+app = adsk.core.Application.get()
+target = %r
+replaced = app.activeDocument.name if app.activeDocument else ''
+ok = False
+for doc in app.documents:
+    if doc.name == target or doc.name.rsplit(' v', 1)[0] == target:
+        ok = bool(doc.activate())
+        break
+print('FUSION_GATE|%%s|%%d' %% (replaced, ok))
 """
 
 
