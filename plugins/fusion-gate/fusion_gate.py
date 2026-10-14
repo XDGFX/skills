@@ -771,6 +771,8 @@ def call(payload: dict, timeout: float) -> dict:
     """Ask the service, starting it first if it isn't running."""
     try:
         return _post(payload, timeout)
+    except ConnectionResetError:
+        pass  # the service stopped mid-request, e.g. restarting for an update: ask the next one
     except urllib.error.URLError as e:
         if not isinstance(e.reason, ConnectionRefusedError):
             raise
@@ -779,8 +781,9 @@ def call(payload: dict, timeout: float) -> dict:
     while True:
         try:
             return _post(payload, timeout)
-        except urllib.error.URLError as e:
-            if not isinstance(e.reason, ConnectionRefusedError) or time.monotonic() > deadline:
+        except (ConnectionResetError, urllib.error.URLError) as e:
+            refused = isinstance(e, ConnectionResetError) or isinstance(e.reason, ConnectionRefusedError)
+            if not refused or time.monotonic() > deadline:
                 raise
             time.sleep(0.3)
 

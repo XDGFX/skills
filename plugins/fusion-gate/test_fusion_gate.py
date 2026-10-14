@@ -407,6 +407,22 @@ def test_service_turns_refusal_into_a_denying_hook():
     run(go())
 
 
+def test_command_survives_the_service_restarting_mid_request(monkeypatch):
+    import http.client
+
+    replies = iter([http.client.RemoteDisconnected("gone"), {"ok": True, "text": "queued"}])
+
+    def post(payload, timeout):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(fg, "_post", post)
+    monkeypatch.setattr(fg, "_start_service", lambda: None)
+    assert fg.call({"op": "acquire"}, 1)["text"] == "queued"
+
+
 def test_hook_output_shapes(monkeypatch):
     replies = {"admit": {"ok": False, "text": "busy"}, "done": {"ok": True, "text": "rules"}}
     monkeypatch.setattr(fg, "call", lambda payload, timeout: replies[payload["op"]])
