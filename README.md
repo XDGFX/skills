@@ -34,10 +34,13 @@ review in which a second agent reads the finished model without knowing what the
 ### fusion-gate (plugin)
 
 Lets several agents share one Fusion. A hook on every `mcp__fusion360__*` call asks a small lock
-service for a turn. The service lets one call at a time through and lends the design to one session
-at a time. It keeps a queue that puts short reads first, notices when Fusion has crashed, and pauses
-agents while you use Fusion, resuming once you stop. The hook starts the service when it's first
-needed, and your MCP config is left alone.
+service for a turn. The service lets one call at a time through. It lends Fusion to one session at
+a time, or to several that declared different documents. Before each call from a sharing session it
+makes one of that session's documents active and reads it back, and refuses the call if it can't, so
+no agent's call runs in another's document. If the gate can't check a call, it refuses the call
+rather than let it through. It keeps a queue that puts short reads first, notices when Fusion has
+crashed, and pauses agents while you use Fusion, resuming once you stop. The hook starts the
+service when it's first needed, and your MCP config is left alone.
 
 ```
 /plugin install fusion-gate@xdgfx
@@ -45,6 +48,40 @@ needed, and your MCP config is left alone.
 
 Needs `uv`. Then `python3 <plugin>/fusion_gate.py status|pause|resume`, or ask any agent to pause
 Fusion for you.
+
+While agents share Fusion, the gate refuses any script that names another agent's document, and
+any script that isn't read-only and uses `app.documents` (apart from `documents.add`). Before and after
+each of their write calls it reads every held document's saved state, timeline, parameter and
+occurrence counts. If another agent's document changed during the call, the gate notifies you,
+tells the document's owner to check it before saving, and refuses the calling agent's write calls
+until it releases. A document an agent creates or opens is its own for the lease, and nobody
+else's afterwards.
+
+What it can't catch:
+
+- The scan reads the script and files it runs through `exec(open('/path.py').read())`. It doesn't
+  read imported modules, so a helper like `hailey_part.py` that opens or saves documents isn't
+  seen. Code assembled at run time, such as `getattr(app, 'docu' + 'ments')`, isn't seen either.
+- The tripwire detects a change; it doesn't prevent one. A call that changes and saves another
+  agent's document is caught only afterwards, and the saved version stays in the document's
+  history. It doesn't block the owner, and it forgets everything when the gate restarts.
+- A document only counts as changed if it was read before the call, so one that an agent was
+  granted mid-call, or that wasn't open, isn't compared.
+- Once an agent releases, its documents, including any it created, are nobody's. Unsaved work
+  then has only `protect` to keep other agents off it.
+- A change that leaves the save flag, timeline, parameter count and occurrence count all as they
+  were goes unnoticed, for example a parameter's value edited in a document that was already
+  unsaved.
+- Two open documents with one name, such as two unsaved "Untitled", can't be told apart. Calls that
+  would need to choose between them are refused.
+- With no `-d`, an agent holds all of Fusion and the only checks are on protected documents: it
+  can't save or close one, but it can still change one in memory.
+- The hook must answer within Claude Code's 90 s hook limit, or Claude Code runs the call anyway.
+  The gate gives up at 85 s, so a very slow Python start-up could still let a call through.
+- A call during which you touch Fusion isn't blamed on the agent. Changes to other agents'
+  documents are still flagged.
+- Calls that skip the hook, such as from a session that started before the plugin was updated,
+  aren't gated at all.
 
 ### tracker-sweep
 

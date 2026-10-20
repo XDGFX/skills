@@ -170,10 +170,18 @@ for. They insert the first of each kind; Insert Similar does the rest.
   other sessions whether Fusion is free. A call refused with "…your call was NOT run" never
   reached Fusion; the refusal gives the `fusion_gate.py acquire` command that waits your turn.
   Before a multi-step job, run it with a reason, an estimate and `-d` listing every document
-  you will open, read or change: agents whose documents don't overlap take turns call by call,
-  and the gate makes your document active again before each of your calls. Run `release` once
-  the work is saved. Never save or close a document the gate lists. When the user wants Fusion to
-  themselves, `pause` and `resume` hand it over and back. Any installed copy of the script
+  you will open, read or change. Agents whose documents don't overlap take turns call by call.
+  Before each of your calls the gate makes one of your documents active and reads it back, and
+  refuses the call if it can't. Without `-d` you hold all of Fusion and everyone else waits.
+  Documents your calls create or open become yours until you release, so save a new one under
+  its name in the call that creates it. While another agent shares Fusion, a script may work
+  only in the active document. The gate refuses one that uses `app.documents` (apart from
+  `documents.add`) or names another agent's document, and a read-only script that saves or
+  closes. Open another of your documents with `fusion_mcp_execute` `document` `open`. If your call
+  changes another agent's document anyway, the gate stops you until you release. A refusal says
+  "…NOT run" and keeps your lease. Don't work around it. Run `release` once the work is saved.
+  Never save or close a document the gate lists. When the user wants Fusion to themselves,
+  `pause` and `resume` hand it over and back. Any installed copy of the script
   reaches the same gate:
   `python3 "$(ls -d ~/.claude/plugins/cache/xdgfx/fusion-gate/*/ | tail -1)fusion_gate.py" status`.
 - Reported once and not confirmed: `occurrences.addByInsert` intermittently raising

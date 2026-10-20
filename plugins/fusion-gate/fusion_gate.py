@@ -6,8 +6,10 @@
 """fusion-gate: agents take turns with Fusion.
 
 Fusion runs every MCP call on its main thread, and two sessions' calls at once can swap each
-other's output. A hook on every Fusion tool asks this file's lock service for a turn. The
-service lends the design to one session at a time and lets one call at a time through.
+other's output or land in each other's documents. A hook on every Fusion tool asks this file's
+lock service for a turn. The service lends Fusion to one session at a time, or to several that
+declared different documents, and lets one call at a time through. Before a sharing session's
+call it makes one of that session's documents active and checks it, or refuses the call.
 
     fusion_gate.py hook                              the plugin's hook (reads the event on stdin)
     fusion_gate.py serve                             the lock service; the hook starts it
@@ -15,9 +17,11 @@ service lends the design to one session at a time and lets one call at a time th
     fusion_gate.py release | status | pause | resume
     fusion_gate.py protect DOCUMENT [REASON] [--clear]
 
-The hook and the commands need only the standard library; the service needs aiohttp, so it
-runs under `uv run --script`.
+The hook and the commands need only the standard library and run on Python 3.9 (macOS's own
+python3); the service needs aiohttp, so it runs under `uv run --script`.
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -38,12 +42,14 @@ PORT = int(os.environ.get("FUSION_GATE_PORT", "27183"))
 FUSION = os.environ.get("FUSION_GATE_FUSION", "http://127.0.0.1:27182/mcp")
 SCRIPT = os.path.abspath(__file__)
 LOG = Path.home() / "Library" / "Logs" / "fusion-gate.log"
+STATE_DIR = Path(os.environ.get("FUSION_GATE_STATE_DIR") or Path.home() / ".cache" / "fusion-gate")
 
 
 @dataclasses.dataclass
 class Config:
     wait_block: float = 30  # a Fusion call waits this long for its turn, then is refused
-    holder_wait: float = 70  # a holder's call waits this long for another holder's call (under the hook's 90 s)
+    holder_wait: float = 55  # a holder's call waits this long for another holder's call,
+    switch_wait: float = 20  # then this long for the gate's document check: both under the hook's 85 s
     acquire_wait: float = 100  # under the Bash tool's default 2 min limit
     idle_read: float = 30  # a lease ends after this long without a call
     idle_write: float = 300
@@ -76,6 +82,53 @@ def classify(tool: str, args: dict) -> str:
     return "write"
 
 
+NOT_RUN = "NOT run"  # agents are told to look for this in a refusal (fusion-modelling's API.md)
+SAVES = re.compile(r"""\.\s*save(?:As)?\s*\(|['"]save(?:As)?['"]""")  # also getattr(doc, 'save')
+CLOSES = re.compile(r"""\.\s*close\s*\(\s*[^)\s]|['"]close['"]""")  # Document.close takes an argument; a file's doesn't
+SWITCHES = re.compile(r"documents\.(?:open|add)\(|\.activate\(")
+# A script that can reach documents other than the active one, apart from making a new design.
+DOCUMENT_ACCESS = re.compile(r"\bdocuments\b(?!\s*\.\s*add\s*\()")
+RUNS_FILE = re.compile(r"""open\(\s*(['"])(/[^'"]+\.py)\1""")  # exec(open('/path/part.py').read())
+
+
+def script_text(script: str, depth: int = 2) -> str:
+    """A script with the files it runs through exec(open(...)), so the gate can read what it does."""
+    text = script
+    for m in RUNS_FILE.finditer(script) if depth else ():
+        try:
+            text += "\n" + script_text(Path(m.group(2)).read_text(errors="replace"), depth - 1)
+        except OSError:
+            pass
+    return text
+
+
+def effects(tool: str, args: dict | None, kind: str) -> tuple[set, str]:
+    """What a call may do beyond changing the active design: 'save', 'close' or 'switch' documents.
+    Also returns the script text to look for other documents' names in."""
+    if args is None:  # nothing to read: assume the worst a call of this kind can do
+        return ({"save", "close", "switch"} if kind == "write" else set()), ""
+    tool = tool.removeprefix("mcp__fusion360__")
+    obj = args.get("object") or {}
+    if tool == "fusion_mcp_execute" and args.get("featureType") == "document":
+        operation = {"save": "save", "close": "close", "open": "switch"}.get(obj.get("operation"))
+        return ({operation} if operation else {"save", "close", "switch"}), ""
+    if tool == "fusion_mcp_execute" and args.get("featureType") == "script":
+        text = script_text(str(obj.get("script") or ""))
+        return {e for e, rx in (("save", SAVES), ("close", CLOSES), ("switch", SWITCHES)) if rx.search(text)}, text
+    return set(), ""
+
+
+def base_name(name: str) -> str:
+    """A document's name without Fusion's version, for comparing: 'Rack v20' -> 'rack'."""
+    return re.sub(r" v\d+$", "", name.strip()).casefold()
+
+
+def names_in(text: str, names) -> list[str]:
+    """Which of `names` appear in `text` as whole names: assy_box doesn't match assy_box_water."""
+    folded = text.casefold()
+    return sorted(n for n in names if re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])", folded))
+
+
 def log(text: str) -> None:
     print(time.strftime("%H:%M:%S"), text, file=sys.stderr, flush=True)
 
@@ -97,12 +150,25 @@ class Lease:
     told: bool = False
     overrun_told: bool = False
     notice: str = ""  # told to the holder when its next call comes back
+    owned: list = dataclasses.field(default_factory=list)  # documents its calls created or opened
+    active: str = ""  # the document of its own that its last call left active
+
+    @property
+    def first_document(self) -> str:
+        return self.documents.split(",")[0].strip()
 
 
 def document_set(documents: str | None) -> frozenset | None:
     """The documents a session declared, or None: it needs all of Fusion."""
-    names = frozenset(d.strip().casefold() for d in (documents or "").split(",") if d.strip())
+    names = frozenset(base_name(d) for d in (documents or "").split(",") if d.strip())
     return names or None
+
+
+@dataclasses.dataclass(frozen=True)
+class Refusal:
+    """Why the gate stopped a call: `code` for the gate and its tests, `text` for the agent."""
+    code: str
+    text: str
 
 
 @dataclasses.dataclass
@@ -113,15 +179,22 @@ class Pause:
 
 class Gate:
     def __init__(self, config: Config | None = None, notify=lambda text: None, probe=None,
-                 state: Path | None = None, activate=None):
+                 state: Path | None = None, guard=None):
         self.cfg = config or Config()
         self.notify = notify
         self.probe = probe  # returns once Fusion has finished whatever it is running
-        self.activate = activate  # makes a document active; returns (the one it replaced, success)
+        self.guard = guard  # runs GUARD_SCRIPT's plan in Fusion and returns its answer; None in queue tests
         # Holders: several when each declared documents no other holder declared.
         self.leases: dict[str, Lease] = {}
         self.last_session: str | None = None  # whose call Fusion ran last
-        self.last_doc: dict[str, str] = {}  # session -> the document it had active when interrupted
+        self.last_done = 0.0  # when a call last came back
+        self.known: set | None = None  # documents open at the last check; None once unknown
+        self.checked_at = 0.0  # when the check the gate last learnt from started
+        self.this_check = 0.0  # when the latest check started
+        self.last_active = ""  # the active document the last check saw
+        self.pending: tuple | None = None  # (session, documents read before its write call, when) until decided
+        self.refused: dict[str, Refusal] = {}  # session -> why the gate stopped its call
+        self.tripped: dict[str, str] = {}  # session whose call changed another's document -> what to tell it
         self.pause: Pause | None = None
         self.down = False
         self.calls: dict[str, tuple[str, float]] = {}  # call in Fusion -> (session, started)
@@ -171,9 +244,10 @@ class Gate:
             self.calls[call] = (session, time.monotonic())
 
     async def admit(self, session: str, kind: str, timeout: float, call: str | None = None,
-                    through_down: bool = False):
-        """Wait for `session`'s turn. With `call`, also wait for Fusion to be idle and record the
-        call as running. Returns None once through, otherwise why not: 'down', 'paused', 'busy'."""
+                    through_down: bool = False, tool: str = "", args: dict | None = None):
+        """Wait for `session`'s turn. With `call`, also wait for Fusion to be idle, record the call
+        as running and check it can't reach another holder's documents. Returns None once through,
+        otherwise why not: 'down', 'paused', 'busy', or 'unsafe' with the reason in `refused`."""
         if kind == "stateless":
             return await self._wait(timeout, through_down, lambda: self._slot(call, session))
         now = time.monotonic()
@@ -212,22 +286,43 @@ class Gate:
                     self.places[session] = (rank, since, time.monotonic())
                 self._poke()
         if why is None and call:
-            await self._switch_to(session)
+            try:
+                unsafe = await self._check(session, kind, tool, args)
+            except Exception as e:
+                unsafe = Refusal("gate_error", f"the gate failed while checking the call ({type(e).__name__}: {e}).")
+            except BaseException:  # cancelled: the call never reaches Fusion, so it mustn't hold the slot
+                self.calls.pop(call, None)
+                self._poke()
+                raise
+            if unsafe:
+                self.calls.pop(call, None)
+                self._poke()
+                self.refused[session] = unsafe
+                log(f"refused a call by {self.describe(session)}: {unsafe.text}")
+                why = "unsafe"
         return why
 
     def documents(self, session: str) -> frozenset | None:
-        """What `session` may share Fusion around; None when it needs all of Fusion."""
-        if not self.cfg.share:
-            return None
-        return document_set(self.intent.get(session, {}).get("documents"))
+        """What `session` works in: what it declared and what its calls created or opened. None
+        when it declared nothing and so may touch any document."""
+        declared = document_set(self.intent.get(session, {}).get("documents"))
+        lease = self.leases.get(session)
+        return declared | frozenset(lease.owned) if declared and lease else declared
 
     def _clash(self, a: str, b: str) -> bool:
-        """Declared sets clash when they overlap. A session that declared nothing works around
-        everyone's declared documents, but two of them can't tell whether they collide."""
+        """Declared sets clash when they overlap. A session that declared nothing could touch any
+        document, so it clashes with everyone and holds Fusion alone; so does everyone with sharing off."""
         mine, theirs = self.documents(a), self.documents(b)
-        if mine is None or theirs is None:
-            return mine is None and theirs is None
-        return bool(mine & theirs)
+        return not self.cfg.share or mine is None or theirs is None or bool(mine & theirs)
+
+    def owner(self, document: str, besides: str | None = None) -> str | None:
+        """The holder, other than `besides`, whose documents include `document` (a base name)."""
+        return next((s for s in self.leases if s != besides and document in (self.documents(s) or ())), None)
+
+    def _protected_for(self, session: str) -> dict[str, str]:
+        """Protected documents `session` didn't declare, by base name: it may never save or close them."""
+        mine = self.documents(session) or frozenset()
+        return {base_name(d): why for d, why in self.protected.items() if base_name(d) not in mine}
 
     def _may_grant(self, session: str) -> bool:
         """Free of every holder's documents and of every waiter's queued ahead of it."""
@@ -239,38 +334,225 @@ class Gate:
         return not any(self._clash(session, other) for other in [*self.leases, *ahead])
 
     def reserved(self, viewer: str) -> dict[str, str]:
-        """Documents other holders declared: document -> who holds it."""
-        return {d.strip(): self.describe(s) for s, lease in self.leases.items() if s != viewer
-                for d in lease.documents.split(",") if d.strip()}
+        """Documents other holders declared or created: document -> who holds it."""
+        return {d: self.describe(s) for s in self.leases if s != viewer for d in sorted(self.documents(s) or ())}
 
     def _reserved_line(self, viewer: str) -> str:
-        if not self.cfg.share or self.documents(viewer) is not None:
-            return ""  # a declared holder can't clash with anyone's reservations
         shown = self.reserved(viewer)
         if not shown:
             return ""
         return "\n\nOther agents hold these; don't open, change, save or close them: " + "; ".join(
             f"{d} ({who})" for d, who in shown.items())
 
-    async def _switch_to(self, session: str) -> None:
-        """Before a sharing holder's call, give it back the document it had active."""
-        previous, self.last_session = self.last_session, session
+    # --- keeping each holder in its own documents ------------------------------------------
+
+    def foreign(self, viewer: str) -> dict[str, str]:
+        """Other holders' documents, by base name, and who holds each."""
+        return {d: self.describe(s) for s in self.leases if s != viewer for d in self.documents(s) or ()}
+
+    def _attributable(self, previous: str | None) -> bool:
+        """Whether what changed in Fusion since the last check was done by `previous`'s last call:
+        it's a sharing holder and Cal hasn't touched Fusion since."""
+        return (previous in self.leases and self.documents(previous) is not None
+                and self.last_cal_input <= self.checked_at)
+
+    def _tripped(self, session: str, kind: str) -> Refusal | None:
+        if kind == "write" and session in self.tripped:
+            return Refusal("tripped", self.tripped[session])
+        return None
+
+    async def _check(self, session: str, kind: str, tool: str, args: dict | None) -> Refusal | None:
+        """Before a call reaches Fusion: put a sharing holder in a document of its own, read the
+        active document back, and refuse what could reach another holder's or a protected
+        document. Returns why the call is refused, or None."""
+        refused = await self._refusal(session, kind, tool, args)
+        if not refused:
+            self.last_session = session  # only a call that runs can have changed anything
+        return refused
+
+    async def _refusal(self, session: str, kind: str, tool: str, args: dict | None) -> Refusal | None:
+        previous = self.last_session
         lease = self.leases.get(session)
-        if not (self.activate and lease and previous not in (None, session)):
-            return
-        target = self.last_doc.get(session) or lease.documents.split(",")[0].strip()
-        if not target:
-            return  # declared nothing and hasn't been interrupted yet
+        if not (self.guard and lease):
+            return None
+        stopped = self._tripped(session, kind)
+        if stopped:
+            return stopped
+        acts, text = effects(tool, args, kind)
+        mine, foreign, protected = self.documents(session), self.foreign(session), self._protected_for(session)
+        if kind == "read" and acts & {"save", "close"}:
+            return Refusal("read_only_saves",
+                           "a read-only script can't save or close a document. Send it without readOnly.")
+        named = names_in(text, foreign)
+        if named:
+            return Refusal("names_foreign", "the script names " + "; ".join(f"{d} ({foreign[d]})" for d in named)
+                           + ". Leave other agents' documents alone.")
+        if mine is not None and kind == "write" and len(self.leases) > 1 and DOCUMENT_ACCESS.search(text):
+            return Refusal("reaches_documents", (
+                "while another agent shares Fusion, a script may work only in the active document: it can't "
+                "use app.documents, apart from documents.add for a new design. The gate makes your document "
+                "active before each call; open another of yours with fusion_mcp_execute document open."))
+        named = names_in(text, protected) if acts else []
+        if named:
+            return Refusal("protected", f"the script can {' and '.join(sorted(acts))} documents and names "
+                           + "; ".join(f"{d} (protected: {protected[d]})" for d in named) + ".")
+        if mine is None and not (acts & {"save", "close"} and protected) and not self.pending:
+            self.known = None  # an unchecked call may open or create documents
+            return None
+        plan = self._plan(target=lease.active or lease.first_document, own=mine, others=foreign,
+                          claim_new=previous == session and self._attributable(previous)) if mine else self._plan()
         try:
-            replaced, ok = await self.activate(target)
-        except Exception as e:  # Fusion down: the port watcher handles it
-            replaced, ok = "", False
-            log(f"activating {target} failed: {e}")
-        if replaced and previous in self.leases:
-            self.last_doc[previous] = replaced
-        if not ok:
-            lease.notice = (f"fusion-gate: another agent ran a call in between and the gate couldn't make "
-                            f"{target} active again. Activate your document before carrying on.")
+            r = await self._ask_fusion(session, plan)
+        except Exception as e:  # slow, down or a strange answer: nothing can be checked, so nothing runs
+            self.known = None
+            why = (f"no answer within {ago(self.cfg.switch_wait)}" if isinstance(e, asyncio.TimeoutError)
+                   else str(e) or type(e).__name__)
+            return Refusal("no_answer", f"the gate couldn't read which document is active in Fusion ({why}).")
+        self._take_in(previous, r)
+        stopped = self._tripped(session, kind)  # the tripwire may have just gone off
+        if stopped:
+            return stopped
+        active, here = r.get("active", ""), base_name(r.get("active", ""))
+        if r.get("landed") and mine:
+            lease.owned.append(here)
+            lease.notice = (f"fusion-gate: none of your documents was open, so the gate opened a new "
+                            f"empty design ({active}) for your call to start in. Close it when you're done.")
+        if r.get("error"):
+            return Refusal("not_active", f"the gate couldn't make one of your documents active: {r['error']}.")
+        if mine:
+            if not here or here not in (self.documents(session) or ()):
+                return Refusal("not_active", f"the gate asked Fusion to make {plan['target']} active, but the "
+                                             f"active document is {active or 'none'}.")
+            left = r.get("replaced", "")
+            if previous == session and left and base_name(left) not in self.documents(session) \
+                    and not self.owner(base_name(left), besides=session):
+                lease.notice = (f"fusion-gate: your last call left {left} active, which isn't one of your "
+                                f"documents, so the gate made {active} active for this call. To work in "
+                                f"{left}, run acquire again with it added to -d.")
+            lease.active = active
+        if acts & {"save", "close"} and here in protected:
+            return Refusal("protected", f"the active document {active} is protected ({protected[here]}).")
+        if mine is None:
+            self.known = None  # the call itself isn't watched
+        if mine and kind == "write":  # the tripwire's baseline, read before this call
+            self.pending = (session, r.get("prints") or {}, self.this_check)
+        return None
+
+    def _plan(self, target: str = "", own=(), others=(), claim_new: bool = False) -> dict:
+        """What GUARD_SCRIPT does: make `target` active unless one of `own` already is (or, with
+        `claim_new`, a document the session's last call created), opening a new empty design when
+        none of `own` is open. With no target it only reads."""
+        return {"target": target, "own": sorted(own), "others": sorted(others), "claim_new": claim_new,
+                "open_blank": bool(target), "known": sorted(self.known) if self.known is not None else None,
+                "watch": self._watched()}
+
+    def _watched(self) -> list[str]:
+        """The documents the tripwire reads: every holder's."""
+        return sorted({d for s in self.leases for d in self.documents(s) or ()})
+
+    def _take_in(self, previous: str | None, r: dict) -> None:
+        """Learn from a check what the last call did: whether it changed another holder's
+        document, and which documents it opened or created."""
+        self._tripwire(r.get("prints"))
+        self._attribute(previous, r)
+        self.known = {base_name(n) for n in r.get("open_after", r["open"])}
+        for lease in self.leases.values():  # one saved under a new name or closed isn't its any more
+            lease.owned = [d for d in lease.owned if d in self.known]
+        self.last_active = r.get("active", "")
+        self.checked_at = self.this_check
+
+    def _attribute(self, previous: str | None, r: dict) -> None:
+        """The documents the last call opened or created become its session's own, unless someone
+        else has them. A call that left another session's document active is reported."""
+        if self.known is None or not self._attributable(previous):
+            return
+        lease = self.leases[previous]
+        left = base_name(r.get("replaced", ""))
+        for doc in sorted({base_name(n) for n in r["open"]} - self.known):
+            if not self.owner(doc, besides=previous) and doc not in self.documents(previous):
+                lease.owned.append(doc)
+                log(f"{self.describe(previous)} now also holds {doc}, which its call opened or created")
+        other = self.owner(left, besides=previous) if left and r.get("replaced") != self.last_active else None
+        if other:
+            log(f"{self.describe(previous)}'s last call left {r['replaced']} active, a document of "
+                f"{self.describe(other)}'s")
+            lease.notice = (f"fusion-gate: your last call left {r['replaced']} active, which another agent "
+                            f"holds. Don't open or change it.")
+        elif left in self.documents(previous):
+            lease.active = r["replaced"]
+
+    def _tripwire(self, prints: dict | None) -> None:
+        """Decide the pending call: compare each document read before it with the same document
+        now. A changed one that another holder holds was changed by that call (or by Cal)."""
+        if not self.pending or prints is None:
+            return
+        culprit, before, since = self.pending
+        self.pending = None
+        theirs = self.documents(culprit) or () if culprit in self.leases else ()
+        hit = {d: self.owner(d, besides=culprit) for d in before if d not in theirs  # same name: can't tell
+               if not self._unchanged(before[d], prints.get(d, []))}
+        hit = {d: who for d, who in hit.items() if who}
+        if not hit:
+            return
+        cal = self.last_cal_input > since
+        text = (f"{', '.join(hit)} changed during {self.describe(culprit)}'s call"
+                + (" (Cal used Fusion meanwhile, so it may have been Cal)" if cal else ""))
+        log(f"TRIPWIRE: {text}")
+        self.notify(f"STOP: {text}. Check before anyone saves it.")
+        for doc, who in hit.items():
+            owner = self.leases[who]
+            owner.notice = "\n\n".join(filter(None, [owner.notice, (
+                f"fusion-gate: your document {doc} changed during {self.describe(culprit)}'s call. "
+                f"Check it before saving, and tell Cal if it isn't what you left.")]))
+        if not cal and culprit in self.leases:
+            self.tripped[culprit] = (f"your call changed another agent's document ({', '.join(hit)}), so the "
+                                     f"gate refuses your write calls until you release. Stop and tell Cal.")
+
+    @staticmethod
+    def _unchanged(before: list, now: list) -> bool:
+        """Every copy read before reads the same, and any copy opened since is unmodified."""
+        now = list(now)
+        for p in before:
+            if p not in now:
+                return False
+            now.remove(p)
+        return not any(p[1] for p in now)
+
+    def _settle(self) -> None:
+        """Decide a pending call now if Fusion is free; otherwise the next check decides it."""
+        if not (self.guard and self.pending) or self.calls:
+            return
+        culprit = self.pending[0]
+        task = self._gate_call(f"after {self.describe(culprit)}'s call", self._plan())
+        asyncio.ensure_future(self._after(culprit, task))
+
+    def _gate_call(self, label: str, plan: dict) -> asyncio.Future:
+        """Start the gate's own call. It counts as Fusion's running call until it comes back, even
+        when the holder's call is refused for taking too long."""
+        key = f"(the gate's document check {label})"
+        self.calls[key] = ("", time.monotonic())
+        self.this_check = time.monotonic()
+        task = asyncio.ensure_future(self.guard(plan))
+
+        def finished(_):
+            self.calls.pop(key, None)
+            self._poke()
+
+        task.add_done_callback(finished)
+        return task
+
+    async def _ask_fusion(self, session: str, plan: dict, task: asyncio.Future | None = None) -> dict:
+        task = task or self._gate_call(f"for {self.describe(session)}", plan)
+        r = await asyncio.wait_for(asyncio.shield(task), self.cfg.switch_wait)
+        if not isinstance(r, dict) or not isinstance(r.get("open"), list):
+            raise ValueError(f"unexpected answer {str(r)[:200]}")
+        return r
+
+    async def _after(self, session: str, task: asyncio.Future) -> None:
+        try:
+            self._take_in(session, await self._ask_fusion(session, {}, task))
+        except Exception as e:  # the baseline stays pending, so the next check decides instead
+            log(f"after-call check for {self.describe(session)} failed: {e}")
 
     def _slot(self, call, session) -> bool:
         if self.down or self.calls:
@@ -297,6 +579,8 @@ class Gate:
         """A call has come back. Returns what the holder should be told on its first call."""
         session, _ = self.calls.pop(call, (None, 0))
         lease = self.leases.get(session)
+        self.last_done = time.monotonic()
+        self._settle()
         self._poke()
         if not lease:
             return ""
@@ -310,15 +594,19 @@ class Gate:
     def welcome(self, lease: Lease) -> str:
         text = (f"fusion-gate: you hold Fusion until you run `python3 {SCRIPT} release` or make no Fusion "
                 f"call for {ago(lease.idle)}. ")
-        if self.documents(lease.session):
+        if self.documents(lease.session) and self.cfg.share:
             text += (f"You share Fusion with agents working in other documents, so their calls may run between "
-                     f"yours. Before each of your calls the gate makes active the document you last had active. "
-                     f"Open or change only the documents you declared ({lease.documents}); to add one, run "
-                     f"acquire again with the longer -d list.")
-        else:
-            text += ("Other agents' calls may run between yours, and the active document may be theirs: "
-                     "activate yours and check app.activeDocument.name before changing anything. Declare your "
-                     "documents with acquire -d so you know nobody else will touch them.")
+                     f"yours. Before each of your calls the gate makes one of your documents active (the one "
+                     f"you last used), reads app.activeDocument back, and refuses the call if it isn't yours. "
+                     f"Documents your calls create or open become yours until you release; save a new one "
+                     f"under its name straight away. Work only in the documents you declared "
+                     f"({lease.documents}); to add one, run acquire again with the longer -d list. While "
+                     f"another agent shares Fusion, a script may work only in the active document: one that "
+                     f"uses app.documents (apart from documents.add) or names another agent's document is "
+                     f"refused. If your call changes another agent's document, the gate stops you.")
+        elif self.cfg.share:
+            text += ("You declared no documents, so you hold all of Fusion and other agents wait. To share, "
+                     "release and acquire again with -d listing every document you'll open or change.")
         return text + self._reserved_line(lease.session) + self._protected_line(lease.session)
 
     def _grant(self, session: str) -> None:
@@ -327,19 +615,16 @@ class Gate:
                                      documents=self.intent.get(session, {}).get("documents") or "")
         self.places.pop(session, None)
         log(f"Fusion → {self.describe(session)}")
-        documents = self.leases[session].documents
-        if documents:  # holders that declared nothing must hear about the new reservation
-            for other, lease in self.leases.items():
-                if other != session and self.documents(other) is None:
-                    lease.notice = (f"fusion-gate: {self.describe(session)} now also holds Fusion; don't open, "
-                                    f"change, save or close {documents}.")
 
     def release(self, session: str, why: str) -> bool:
         if session not in self.leases:
             return False
         log(f"{self.describe(session)} let go of Fusion: {why}")
+        if self.pending and self.pending[0] == session:
+            self._settle()  # its last call is still compared with what it found
         del self.leases[session]
-        self.last_doc.pop(session, None)
+        self.refused.pop(session, None)
+        self.tripped.pop(session, None)
         self._poke()
         return True
 
@@ -393,7 +678,8 @@ class Gate:
         self.down = down
         if down:
             self.leases.clear()
-            self.last_doc.clear()
+            self.tripped.clear()
+            self.known = self.pending = None
             self.last_session = None
             self.calls.clear()
             log("Fusion is unreachable")
@@ -414,12 +700,24 @@ class Gate:
         if not self.pause:
             return
         self.pause = None
+        self.known = None  # Cal may have opened or switched documents
         for lease in self.leases.values():
             lease.last_call = time.monotonic()
         log(f"resumed: {why}")
         self._poke()
 
     async def acquire(self, session: str, reason: str, minutes: float | None, documents: str) -> str:
+        lease = self.leases.get(session)
+        if lease and self.cfg.share:  # a holder changing its list mustn't take what others hold
+            wanted = document_set(documents)
+            wanted = wanted | frozenset(lease.owned) if wanted else None
+            clash = [s for s in self.leases if s != session and (
+                wanted is None or self.documents(s) is None or wanted & self.documents(s))]
+            if clash:
+                return (f"Not changed: you still hold {lease.documents or 'all of Fusion'}, and "
+                        f"{documents or 'declaring nothing (all of Fusion)'} would overlap what "
+                        f"{', '.join(self.describe(s) for s in clash)} holds. Release first and acquire again "
+                        f"to wait for it.\n\n{self.status(session)}")
         self.intent[session] = {"reason": reason, "minutes": minutes, "documents": documents}
         why = await self.admit(session, "write", self.cfg.acquire_wait, through_down=True)
         if why:
@@ -446,8 +744,8 @@ class Gate:
         return f"{name} ({reason})" if reason else name
 
     def _protected_line(self, viewer: str | None = None) -> str:
-        own = document_set(self.leases[viewer].documents) or frozenset() if viewer in self.leases else frozenset()
-        shown = {d: why for d, why in self.protected.items() if d.casefold() not in own}
+        own = (self.documents(viewer) or frozenset()) if viewer in self.leases else frozenset()
+        shown = {d: why for d, why in self.protected.items() if base_name(d) not in own}
         if not shown:
             return ""
         return "\n\nNever save or close: " + "; ".join(f"{d} ({why})" for d, why in shown.items())
@@ -503,7 +801,9 @@ class Gate:
                          f"hasn't touched Fusion for {ago(limit)}.")
         for lease in self.leases.values():
             parts = [f"Held by {self.describe(lease.session, viewer)} for {ago(now - lease.since)}"]
-            parts.append(f"documents: {lease.documents}" if lease.documents else "all of Fusion")
+            parts.append(f"documents: {lease.documents}" if self.documents(lease.session) else "all of Fusion")
+            if lease.owned and self.documents(lease.session):
+                parts.append(f"and from its calls: {', '.join(lease.owned)}")
             if lease.minutes:
                 parts.append(f"expects {lease.minutes:g} min")
             parts.append("a call is running" if self.busy(lease.session) else f"last call {ago(now - lease.last_call)} ago")
@@ -527,9 +827,15 @@ def refusal(gate: Gate, why: str, session: str) -> str:
         "behind": "You still hold Fusion, but another agent's call has been running all this time",
         "paused": "Cal has taken over Fusion",
         "down": "Fusion isn't reachable; it may have crashed or been closed",
+        "unsafe": "fusion-gate stopped this call before it reached Fusion",
     }[why]
+    if why == "unsafe":
+        unsafe = gate.refused.pop(session, None)
+        return (f"{head}, so it was {NOT_RUN}: {unsafe.text if unsafe else 'it could reach another document.'}"
+                f"\n\nYour lease is kept. Don't work around the gate; if this looks wrong, tell Cal."
+                f"\n\n{gate.status(session)}")
     if why == "behind":
-        return (f"{head}, so your call was NOT run. Your lease is kept: send the same call again."
+        return (f"{head}, so your call was {NOT_RUN}. Your lease is kept: send the same call again."
                 f"\n\n{gate.status(session)}")
     if why == "down":
         tail = "Don't retry in a loop. Tell Cal, or wait for Fusion with the command below."
@@ -537,30 +843,90 @@ def refusal(gate: Gate, why: str, session: str) -> str:
         tail = "Don't message other agents about it. Wait your turn with the command below, or do other work and try later."
     command = (f"python3 {SCRIPT} acquire \"<what you are doing>\" -m <minutes>   "
                f"(waits up to {ago(gate.cfg.acquire_wait)} and keeps your place; run it again if still queued)")
-    return f"{head}, so your call was NOT run.\n\n{gate.status(session)}\n\n{tail}\n{command}"
+    return f"{head}, so your call was {NOT_RUN}.\n\n{gate.status(session)}\n\n{tail}\n{command}"
 
 
 # --- the service ------------------------------------------------------------------------
 
 
+# The gate's own call before a sharing holder's call. It reports what was active and open, makes
+# one of the holder's documents active unless one already is, and reads the active document back.
 # The result goes to a file: the Fusion MCP often returns a script's printed output as "".
-ACTIVATE_SCRIPT = """\
+GUARD_SCRIPT = r"""
 import json
+import re
 import adsk.core
+import adsk.fusion
+
+PLAN = json.loads(%r)
+RESULT = %r
+
+
+def base(name):
+    return re.sub(r' v\d+$', '', name.strip()).casefold()
+
+
+def fingerprint(doc):
+    try:
+        design = adsk.fusion.Design.cast(doc.products.itemByProductType('DesignProductType'))
+        timeline = design.timeline
+        return [doc.name, bool(doc.isModified), timeline.count, timeline.markerPosition,
+                design.userParameters.count, design.rootComponent.occurrences.count]
+    except Exception as e:  # a copy open only as a reference has no design to read
+        return [doc.name, bool(getattr(doc, 'isModified', True)), type(e).__name__]
+
+
+def fingerprints(docs):
+    prints = {}
+    for d in docs:
+        if base(d.name) in PLAN['watch']:
+            prints.setdefault(base(d.name), []).append(fingerprint(d))
+    return {b: sorted(p, key=str) for b, p in prints.items()}
+
+
+def usable(doc):
+    try:
+        doc.documentReferences.count  # raises for a copy open only as another design's reference
+        return True
+    except RuntimeError:
+        return False
+
 
 def run(_context: str):
     app = adsk.core.Application.get()
-    target = %r
-    replaced = app.activeDocument.name if app.activeDocument else ''
-    ok = False
-    for doc in app.documents:
-        if doc.name == target or doc.name.rsplit(' v', 1)[0] == target:
-            ok = bool(doc.activate())
-            break
-    with open(%r, 'w') as f:
-        json.dump({'replaced': replaced, 'ok': ok}, f)
+    docs = list(app.documents)
+    active = app.activeDocument
+    out = {'nonce': PLAN.get('nonce'), 'replaced': active.name if active else '', 'open': [d.name for d in docs],
+           'landed': False, 'error': '', 'prints': fingerprints(docs)}
+    here = base(active.name) if active else None
+    new = PLAN['known'] is not None and here not in PLAN['known'] and here not in PLAN['others']
+    unique = sum(base(d.name) == here for d in docs) == 1  # two 'Untitled' can't tell whose is whose
+    stay = here is not None and unique and (here in PLAN['own'] or (PLAN['claim_new'] and new))
+    target = PLAN['target']
+    if target and not stay:
+        found = [d for d in docs if d.name == target] or [d for d in docs if base(d.name) == base(target)]
+        if len(found) > 1:
+            found = [d for d in found if usable(d)]
+        if not found:
+            found = [d for d in docs if base(d.name) in PLAN['own'] and usable(d)][:1]
+        if len(found) > 1:
+            out['error'] = 'more than one open document is called ' + target
+        elif found:
+            found[0].activate()
+        elif PLAN['open_blank']:
+            app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+            out['landed'] = True
+    active = app.activeDocument
+    out['active'] = active.name if active else ''
+    out['open_after'] = [d.name for d in app.documents]
+    with open(RESULT, 'w') as f:
+        json.dump(out, f)
 """
-ACTIVATE_RESULT = Path.home() / ".cache" / "fusion-gate" / "activate.json"
+GUARD_RESULT = STATE_DIR / f"guard-{PORT}.json"
+
+
+def guard_script(plan: dict, result: Path) -> str:
+    return GUARD_SCRIPT % (json.dumps(plan), str(result))
 
 
 class Fusion:
@@ -592,20 +958,25 @@ class Fusion:
         await self._tool("fusion_mcp_read", {"queryType": "apiDocumentation", "searchPattern": "^Application$",
                                              "apiCategory": "class"})
 
-    async def activate(self, name: str) -> tuple[str, bool]:
-        """Make the open document `name` active. Returns the one it replaced, and whether it worked."""
+    async def guard(self, plan: dict) -> dict:
+        """Run GUARD_SCRIPT with `plan`; raises when Fusion gives no usable answer."""
         started = time.monotonic()
-        ACTIVATE_RESULT.unlink(missing_ok=True)
+        plan = plan | {"nonce": os.urandom(8).hex()}
+        GUARD_RESULT.parent.mkdir(parents=True, exist_ok=True)
+        GUARD_RESULT.unlink(missing_ok=True)
         text = await self._tool("fusion_mcp_execute", {"featureType": "script", "object": {
-            "script": ACTIVATE_SCRIPT % (name, str(ACTIVATE_RESULT))}})
+            "script": guard_script(plan, GUARD_RESULT)}})
         try:
-            result = json.loads(ACTIVATE_RESULT.read_text())
+            result = json.loads(GUARD_RESULT.read_text())
         except (OSError, ValueError):
-            log(f"activate {name}: no result; Fusion said {text[:300]}")
-            return "", False
-        log(f"activate {name}: replaced {result['replaced']!r}, ok={result['ok']}, "
-            f"{time.monotonic() - started:.1f} s")
-        return result["replaced"], bool(result["ok"])
+            log(f"document check: no result; Fusion said {text[:300]}")
+            raise RuntimeError("Fusion didn't report the active document") from None
+        if result.get("nonce") != plan["nonce"]:
+            raise RuntimeError("Fusion's answer was from an earlier check")
+        log(f"document check for {plan['target'] or 'watched documents'}: was {result['replaced']!r}, now "
+            f"{result['active']!r}{', opened a new design' if result['landed'] else ''}"
+            f"{', ' + result['error'] if result['error'] else ''}, {time.monotonic() - started:.1f} s")
+        return result
 
 
 GATE = None  # aiohttp's AppKey, made with the app so the hook never imports aiohttp
@@ -623,7 +994,7 @@ async def handle(request):
     if op == "admit":
         holds = session in gate.leases
         why = await gate.admit(session, body["kind"], gate.cfg.holder_wait if holds else gate.cfg.wait_block,
-                               call=body.get("call"))
+                               call=body.get("call"), tool=body.get("tool") or "", args=body.get("input"))
         if why == "busy" and session in gate.leases:
             why = "behind"
         ok, text = why is None, refusal(gate, why, session) if why else ""
@@ -729,9 +1100,8 @@ def mac_notify(text: str) -> None:
 async def serve() -> None:
     from aiohttp import web
 
-    state = Path.home() / ".cache" / "fusion-gate" / "state.json"
     fusion = Fusion(FUSION)
-    gate = Gate(Config(), notify=mac_notify, probe=fusion.wait_idle, state=state, activate=fusion.activate)
+    gate = Gate(Config(), notify=mac_notify, probe=fusion.wait_idle, state=STATE_DIR / "state.json", guard=fusion.guard)
     runner = web.AppRunner(make_app(gate))
     await runner.setup()
     try:
@@ -768,7 +1138,8 @@ def _start_service() -> None:
 
 
 def call(payload: dict, timeout: float) -> dict:
-    """Ask the service, starting it first if it isn't running."""
+    """Ask the service, starting it first if it isn't running. `timeout` covers the whole wait."""
+    deadline = time.monotonic() + timeout
     try:
         return _post(payload, timeout)
     except ConnectionResetError:
@@ -777,15 +1148,24 @@ def call(payload: dict, timeout: float) -> dict:
         if not isinstance(e.reason, ConnectionRefusedError):
             raise
     _start_service()
-    deadline = time.monotonic() + 30  # the first start downloads aiohttp
+    start_by = min(deadline, time.monotonic() + 30)  # the first start downloads aiohttp
     while True:
         try:
-            return _post(payload, timeout)
+            return _post(payload, max(1.0, deadline - time.monotonic()))
         except (ConnectionResetError, urllib.error.URLError) as e:
             refused = isinstance(e, ConnectionResetError) or isinstance(e.reason, ConnectionRefusedError)
-            if not refused or time.monotonic() > deadline:
+            if not refused or time.monotonic() > start_by:
                 raise
             time.sleep(0.3)
+
+
+# Under Claude Code's 90 s hook timeout, which would let the call through, and over the service's own limits.
+ADMIT_TIMEOUT = Config.holder_wait + Config.switch_wait + 10
+
+
+def deny(text: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": text}}
 
 
 def hook(event: dict) -> dict | None:
@@ -793,13 +1173,10 @@ def hook(event: dict) -> dict | None:
     name, session = event.get("hook_event_name"), event.get("session_id", "")
     where = Path(event.get("cwd") or "").name
     if name == "PreToolUse":
-        kind = classify(event.get("tool_name", ""), event.get("tool_input") or {})
-        r = call({"op": "admit", "session": session, "where": where, "kind": kind,
-                  "call": event.get("tool_use_id")}, max(Config.wait_block, Config.holder_wait) + 15)
-        if r["ok"]:
-            return None
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                       "permissionDecisionReason": r["text"]}}
+        tool, args = event.get("tool_name", ""), event.get("tool_input") or {}
+        r = call({"op": "admit", "session": session, "where": where, "kind": classify(tool, args),
+                  "call": event.get("tool_use_id"), "tool": tool, "input": args}, ADMIT_TIMEOUT)
+        return None if r["ok"] else deny(r["text"])
     if name in ("PostToolUse", "PostToolUseFailure"):
         r = call({"op": "done", "session": session, "call": event.get("tool_use_id")}, 10)
         if r["text"] and name == "PostToolUse":
@@ -808,6 +1185,32 @@ def hook(event: dict) -> dict | None:
     if name == "SessionEnd":
         call({"op": "forget", "session": session}, 5)
     return None
+
+
+def _stateless(event: dict) -> bool:
+    """Whether the call never looks at a design; False when that can't be told."""
+    try:
+        return classify(event.get("tool_name", ""), event.get("tool_input") or {}) == "stateless"
+    except Exception:
+        return False
+
+
+def run_hook(stdin: str) -> dict | None:
+    """The hook, failing closed: a Fusion call the gate couldn't check is refused, apart from
+    the stateless ones that never look at a design."""
+    try:
+        event = json.loads(stdin)
+    except ValueError:
+        return deny(f"fusion-gate couldn't read the hook's event, so this call was {NOT_RUN}. Tell Cal.")
+    try:
+        return hook(event)
+    except Exception as e:
+        print(f"fusion-gate: {type(e).__name__}: {e}", file=sys.stderr)
+        if event.get("hook_event_name") not in ("PreToolUse", None) or _stateless(event):
+            return None
+        return deny(f"fusion-gate couldn't check this call ({type(e).__name__}: {e}), so it was {NOT_RUN}. "
+                    f"Check the gate with `python3 {SCRIPT} status`; its log is {LOG}. Tell Cal if it "
+                    f"stays broken: don't work around it.")
 
 
 def main() -> None:
@@ -833,11 +1236,7 @@ def main() -> None:
         asyncio.run(serve())
         return
     if args.command == "hook":
-        try:
-            out = hook(json.load(sys.stdin))
-        except OSError as e:  # never let a broken gate stop Fusion work
-            print(f"fusion-gate unavailable, letting the call through: {e}", file=sys.stderr)
-            return
+        out = run_hook(sys.stdin.read())
         if out:
             print(json.dumps(out))
         return
