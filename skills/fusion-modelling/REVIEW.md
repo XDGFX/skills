@@ -8,11 +8,12 @@ feature cannot be understood without knowing its purpose, that is a finding.
 
 1. **Make the report.** Save the design, then run
    [`scripts/model_report.py`](scripts/model_report.py) through the Fusion MCP with `DOC` set to
-   the document and `PICTURES` set to an empty directory, as its docstring shows. Write the
-   report text to a file beside the pictures. Name the directory for nothing: `review/01`, not
-   `review/actuator`. Done when the directory holds the report and one picture per sketch.
-   An assembly's report lists its occurrences and joints, and has pictures only for sketches
-   of its own.
+   the document, `PICTURES` set to an empty directory, and `SKETCHES` naming at most twelve
+   sketches: those that shape the main solids and the mating features, and any the change
+   touched. Write the report text to a file beside the pictures. Name the directory for nothing:
+   `review/01`, not `review/actuator`. Done when the directory holds the report and a picture
+   of each chosen sketch; the report covers every sketch either way. An assembly's report lists
+   its occurrences and joints, and has pictures only for sketches of its own.
 
 2. **Brief the reviewer.** Start a fresh agent and give it exactly three things: the path to
    this skill's `SKILL.md`, the path to the report, and the path to the pictures. Ask it to:

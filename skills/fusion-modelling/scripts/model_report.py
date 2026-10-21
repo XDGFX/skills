@@ -4,13 +4,14 @@ shapes, constraints and dimensions. Read-only unless PICTURES is set.
 Run through the Fusion MCP from a wrapper, which sets the inputs and prints the result:
 
     def run(context):
-        ns = {'DOC': 'my_part', 'PICTURES': '/some/dir'}   # both optional
+        ns = {'DOC': 'my_part', 'PICTURES': '/some/dir', 'SKETCHES': ['base', 'hook']}   # all optional
         exec(open('<this file>').read(), ns)
         print(ns['report'])
 
 DOC names an open document (default: the active one). PICTURES is a directory to save one image
 per sketch into, looking square at it with its dimensions shown; that changes what is visible and
-the camera, so the wrapper must not be marked read-only when it is set.
+the camera, so the wrapper must not be marked read-only when it is set. SKETCHES limits the
+pictures to the sketches of those names (default: every sketch).
 """
 
 import collections
@@ -199,7 +200,7 @@ def picture(app, sk, others, path):
     vp.saveAsImageFile(path, 1100, 850)
 
 
-def build_report(doc_name=None, pictures=None):
+def build_report(doc_name=None, pictures=None, picture_names=None):
     app = adsk.core.Application.get()
     doc = app.activeDocument
     if doc_name:
@@ -259,8 +260,11 @@ def build_report(doc_name=None, pictures=None):
 
     if pictures:
         shown = [(s, s.isVisible) for s in sketches]
+        chosen = [s for s in sketches if picture_names is None or s.name in picture_names]
         for n, sk in enumerate(sketches):
-            path = '%s/%02d_%s.png' % (pictures, n, re.sub(r'[^A-Za-z0-9]+', '_', sk.name))
+            if sk not in chosen:
+                continue
+            path ='%s/%02d_%s.png' % (pictures, n, re.sub(r'[^A-Za-z0-9]+', '_', sk.name))
             try:
                 picture(app, sk, sketches, path)
             except Exception as e:
@@ -269,8 +273,8 @@ def build_report(doc_name=None, pictures=None):
             s.isVisible = v
             s.areDimensionsShown = False
             s.areConstraintsShown = False
-        out.append('PICTURES one per sketch, in timeline order, in %s' % pictures)
+        out.append('PICTURES %d of %d sketches, in timeline order, in %s' % (len(chosen), len(sketches), pictures))
     return '\n'.join(out)
 
 
-report = build_report(globals().get('DOC'), globals().get('PICTURES'))
+report = build_report(globals().get('DOC'), globals().get('PICTURES'), globals().get('SKETCHES'))

@@ -20,8 +20,23 @@ limits: when a rule and the stranger's convenience disagree, the stranger wins.
 Writing against the Fusion API: read [`API.md`](API.md) first, for the call behind each native
 tool and the places the API behaves differently from the UI.
 
-Other agents share Fusion through a queue (see the last rules in `API.md`). Activate your own
-document before changing anything: the active one may be another agent's.
+## Working in Fusion
+
+- **Search first.** Look through the existing models and scripts for the part, or one close to
+  it, before building anything new.
+- **One Fusion writer at a time.** Parallel subagents pay off for offline work: review,
+  research, reading scripts. Parallel writers into Fusion never have; run a second only in
+  documents of its own, declared to the gate. Other agents share Fusion through that gate
+  (`API.md`, Calling Fusion): activate your own document before changing anything.
+- **Calls are short, idempotent and scoped**, and a timeout means the script is still running:
+  `API.md`, Calling Fusion.
+- **Save after each stage, and restart Fusion between long rounds**: its memory grows over
+  staged rebuilds, temporary bodies and screenshots.
+- **Keep the user posted.** On a long job, post a one-line note after each stage, so they aren't
+  watching an unchanged Fusion and wondering.
+- **Check orientation before showing a part** that carries text or a directional pattern: take
+  a labelled screenshot of each face that carries it, and check it reads the right way round and
+  faces the right way.
 
 ## Structure
 
@@ -84,9 +99,11 @@ document before changing anything: the active one may be another agent's.
     mirror features.** Sketch geometry is for shapes no feature makes, such as a nut pocket.
 15. **Name everything**: sketches, planes, features, bodies and groups, by what they are for.
 16. **Edit, don't redraw.** When changing an existing model by hand or through the MCP, change
-    the sketch that is there. Later features hang off its geometry.
+    the sketch that is there. Later features hang off its geometry. A document its script owns
+    is the exception: rule 25.
 17. **A yellow warning in the timeline is a failure**, the same as a red one. So is an error
-    from the API: find what it objects to and fix that, and never catch it and carry on.
+    from the API: find what it objects to and fix that. Catch it only to roll back, report or
+    re-raise; an error swallowed so the script carries on is a hidden failure.
 
 ## Bought-in parts
 
@@ -124,9 +141,11 @@ scattering.
 24. **The assembly holds no sizes of its own.** A length that belongs to a part is read from
     that part. A value that exists only in the assembly, such as a pose, is a named parameter
     there or the joint's own drive value.
-25. **Edit, don't rebuild.** Changing an assembly changes the joint or the part that is there.
-    Deleting every occurrence and joint to place them again throws away whatever the user
-    adjusted by hand.
+25. **Edit, don't rebuild, what a person has touched.** Changing a hand-edited assembly changes
+    the joint or the part that is there. Deleting every occurrence and joint to place them again
+    throws away whatever the user adjusted by hand. A document a script owns outright, which
+    nobody edits by hand, is changed in its script and rebuilt: the script wipes the timeline in
+    one step (`API.md`, Assemblies) and builds it again.
 26. **Name every occurrence and joint** for what it is: `left actuator`, `left actuator base
     pin`.
 
@@ -138,9 +157,10 @@ scattering.
 
 ## Review
 
-A part or an assembly is done when it has had a **blind review** and every finding is either
-fixed or shown to the user. This applies to every new one and to every change that adds or
-reshapes a feature or a joint: follow [`REVIEW.md`](REVIEW.md).
+A part or an assembly is done when it has been reviewed and every finding is either fixed or
+shown to the user. A new part and a reshaped mechanism get a **blind review**: follow
+[`REVIEW.md`](REVIEW.md). A smaller edit gets a self-check: run `scripts/model_report.py` and read
+every sketch, feature and joint the edit touched against the rules.
 
 ## Sources
 
