@@ -46,8 +46,10 @@ service when it's first needed, and your MCP config is left alone.
 /plugin install fusion-gate@xdgfx
 ```
 
-Needs `uv`. Then `python3 <plugin>/fusion_gate.py status|pause|resume`, or ask any agent to pause
-Fusion for you.
+Needs `uv`: the hooks run under it, and a Fusion call is refused if they can't. Each subagent
+holds Fusion apart from its parent and siblings. Then `python3 <plugin>/fusion_gate.py
+status|pause|resume`, `release --stale` to free a crashed session's lease, or ask any agent to
+pause Fusion for you.
 
 While agents share Fusion, the gate refuses any script that names another agent's document, and
 any script that isn't read-only and uses `app.documents` (apart from `documents.add`). Before and after

@@ -789,13 +789,36 @@ def test_hook_runs_under_the_system_python():
     assert r.returncode == 0, r.stderr
 
 
+HOOKS = Path(fg.SCRIPT).parent / "hooks"
+
+
 def test_hook_command_blocks_the_call_if_python_fails():
-    hooks = json.loads((Path(fg.SCRIPT).parent / "hooks" / "hooks.json").read_text())["hooks"]
+    hooks = json.loads((HOOKS / "hooks.json").read_text())["hooks"]
     command = hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert command.endswith("|| exit 2")  # exit code 2 is the one that blocks a PreToolUse call
-    failing = command.replace('python3 "${CLAUDE_PLUGIN_ROOT}/fusion_gate.py" hook', "false")
+    failing = command.replace('sh "${CLAUDE_PLUGIN_ROOT}/hooks/gate.sh" pre', "false")
     assert subprocess.run(["/bin/sh", "-c", failing]).returncode == 2
     assert fg.ADMIT_TIMEOUT < hooks["PreToolUse"][0]["hooks"][0]["timeout"]
+
+
+def gate_sh(mode, event, **env):
+    return subprocess.run(["/bin/sh", str(HOOKS / "gate.sh"), mode], input=json.dumps(event), capture_output=True,
+                          text=True, timeout=120, env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), **env})
+
+
+@pytest.mark.skipif(not shutil.which("uv"), reason="uv isn't installed")
+def test_hook_runs_under_uv():
+    r = gate_sh("pre", {"hook_event_name": "Stop"}, PATH=f"{Path(shutil.which('uv')).parent}:/usr/bin:/bin")
+    assert r.returncode == 0, r.stderr
+
+
+def test_hook_without_uv_blocks_fusion_calls_but_never_bash():
+    r = gate_sh("pre", {"hook_event_name": "PreToolUse"}, FUSION_GATE_UV_CANDIDATES="/nowhere/uv")
+    assert r.returncode == 2 and "uv isn't installed" in r.stderr and fg.NOT_RUN in r.stderr
+    gate_command = {"hook_event_name": "PreToolUse", "agent_id": "a1", "tool_input": {"command": "fusion_gate.py release"}}
+    assert gate_sh("bash", gate_command, FUSION_GATE_UV_CANDIDATES="/nowhere/uv").returncode == 0
+    r = gate_sh("bash", {"tool_input": {"command": "ls"}}, FUSION_GATE_UV_CANDIDATES="/nowhere/uv")
+    assert r.returncode == 0 and not r.stderr  # other Bash calls never reach uv
 
 
 def test_another_agents_untitled_document_is_not_mistaken_for_yours():
@@ -815,6 +838,7 @@ def test_holder_pulled_back_to_its_own_document_is_told_why():
     async def go():
         fusion, gate = rack_and_seating()
         fusion.docs.append(FakeDoc(fusion, "assy_main v40"))
+        await declare(gate, "a", "roof_rack_custom_solar_rails_v3")
         await declare(gate, "b", "assy_seating")
         await call(gate, "b", effect=lambda f: f.doc("assy_main v40").activate())  # already open: not b's
         assert await gate.admit("b", "write", 1, call="next", tool=EXEC, args=script("pass")) is None
@@ -838,19 +862,19 @@ def test_turning_sharing_off_keeps_checking_holders_that_already_share():
 
 # --- a sharing script can't reach other documents, and the tripwire catches what gets through --
 
-def test_sharing_script_that_uses_app_documents_is_refused():
+def test_sharing_script_may_look_up_its_own_document_by_name():
+    """As hailey_part.open_document does, from a module the script imports."""
+    build = script("import sys\nsys.path.insert(0, '/parts')\nimport hailey_part\nhailey_part.Part('assy_seating')\n")
+
     async def go():
         fusion, gate = rack_and_seating()
         await declare(gate, "a", "roof_rack_custom_solar_rails_v3")
         await declare(gate, "b", "assy_seating")
-        for reach in ("for d in app.documents:\n    d.name", "app.documents.item(0)", "app.documents.itemByName(n)",
-                      "adsk.core.Application.get().documents.open(f)"):
-            assert await call(gate, "b", script(reach)) == "unsafe", reach
-            assert gate.refused["b"].code == "reaches_documents"
-        assert await call(gate, "b", script("doc = app.documents.add(t)\ndoc.saveAs(n, f, '', '')")) is None
-        assert await call(gate, "b", script("for d in app.documents:\n    print(d.name)", read_only=True)) is None
-        gate.release("a", "test")
-        assert await call(gate, "b", script("app.documents.item(0)")) is None  # alone in Fusion
+        assert await call(gate, "b", build) is None
+        assert await call(gate, "b", script("for d in app.documents:\n    d.name")) is None
+        await call(gate, "b", script("for d in app.documents:\n    d.edit()"), effect=lambda f: f.doc(RACK).edit())
+        await asyncio.sleep(0.01)
+        assert "b" in gate.tripped  # what it does to another agent's document is what stops it
     run(go())
 
 
@@ -923,7 +947,7 @@ def test_a_refused_call_is_not_blamed_for_changes():
         await declare(gate, "a", "roof_rack_custom_solar_rails_v3")
         await declare(gate, "b", "assy_seating")
         await call(gate, "a")
-        assert await call(gate, "b", script("app.documents.item(0)")) == "unsafe"
+        assert await call(gate, "b", script("open('roof_rack_custom_solar_rails_v3')")) == "unsafe"
         assert gate.last_session == "a"
     run(go())
 
@@ -966,6 +990,7 @@ def test_new_document_stays_its_creators_for_the_lease():
 def test_a_check_that_crashes_frees_fusion_and_refuses_the_call():
     async def go():
         fusion, gate = rack_and_seating()
+        await declare(gate, "a", "roof_rack_custom_solar_rails_v3")
         await declare(gate, "b", "assy_seating")
 
         async def explode(plan):
@@ -987,9 +1012,15 @@ def test_document_made_by_a_holder_alone_in_fusion_is_still_its_own():
     async def go():
         fusion, gate = rack_and_seating()
         await declare(gate, "b", "assy_seating")
+        await asyncio.sleep(0.01)  # the first call's after-call check
+        checks = len(fusion.checks)
         await call(gate, "b", effect=lambda f: f.open("cushion_dinette").edit())
         await asyncio.sleep(0.01)
+        assert len(fusion.checks) == checks  # alone, so its call wasn't checked
+        await declare(gate, "a", "roof_rack_custom_solar_rails_v3")  # the next check learns what b made
         assert "cushion_dinette" in gate.documents("b")
+        assert await call(gate, "b", effect=lambda f: f.active.edit()) is None
+        assert fusion.active.name == "cushion_dinette"  # and b is left in it
     run(go())
 
 
@@ -1024,4 +1055,125 @@ def test_undeclared_call_decides_a_pending_tripwire_first():
         assert gate.pending
         await call(gate, "plain")  # holds Fusion alone, but its call is checked while one is pending
         assert not gate.pending
+    run(go())
+
+
+# --- subagents, retried checks, stale holders ----------------------------------------------
+
+def test_subagents_hold_fusion_apart_and_the_tripwire_catches_a_sibling():
+    async def go():
+        fusion, gate = rack_and_seating()
+        await declare(gate, "s/one", "roof_rack_custom_solar_rails_v3")
+        await declare(gate, "s/two", "assy_seating")
+        assert set(gate.leases) == {"s/one", "s/two"}
+        await call(gate, "s/two", effect=lambda f: f.doc(RACK).edit())
+        await asyncio.sleep(0.01)
+        assert "s/two" in gate.tripped and "s/one" not in gate.tripped
+    run(go())
+
+
+def test_subagent_works_in_its_parents_documents_without_waiting_for_it():
+    async def go():
+        fusion, gate = rack_and_seating()
+        await declare(gate, "s", "roof_rack_custom_solar_rails_v3")
+        await declare(gate, "other", "assy_seating")
+        assert await call(gate, "s/builder", effect=lambda f: f.doc(RACK).edit()) is None
+        await asyncio.sleep(0.01)
+        assert not gate.tripped and fusion.active.name == RACK
+        gate.release("s", "test")
+        assert gate.documents("s/builder") == {"roof_rack_custom_solar_rails_v3"}  # kept after its parent left
+        assert await call(gate, "other") is None
+    run(go())
+
+
+def test_hook_keys_a_subagent_apart_and_main_sessions_as_before(monkeypatch):
+    sent = []
+    monkeypatch.setattr(fg, "call", lambda payload, timeout: sent.append(payload) or {"ok": True, "text": ""})
+    pre = {"hook_event_name": "PreToolUse", "session_id": "s", "tool_name": EXEC, "tool_input": {}, "tool_use_id": "t"}
+    fg.hook(pre)
+    fg.hook(pre | {"agent_id": "a1", "agent_type": "general-purpose"})
+    fg.hook({"hook_event_name": "SubagentStop", "session_id": "s", "agent_id": "a1"})
+    assert [p["session"] for p in sent] == ["s", "s/a1", "s/a1"] and sent[-1]["op"] == "forget"
+
+
+def test_subagents_gate_command_must_say_which_subagent_it_is(monkeypatch):
+    monkeypatch.setattr(fg, "call", lambda payload, timeout: pytest.fail("Bash calls never ask the service"))
+    bash = {"hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "Bash", "agent_id": "a1"}
+    acquire = bash | {"tool_input": {"command": 'python3 "/x/fusion_gate.py" acquire "rack" -m 5'}}
+    refused = fg.hook(acquire)["hookSpecificOutput"]
+    assert refused["permissionDecision"] == "deny" and "FUSION_GATE_AGENT=a1" in refused["permissionDecisionReason"]
+    assert fg.hook(bash | {"tool_input": {"command": "FUSION_GATE_AGENT=a1 python3 /x/fusion_gate.py release"}}) is None
+    assert fg.hook(bash | {"tool_input": {"command": "python3 /x/fusion_gate.py status"}}) is None
+    assert fg.hook({**acquire, "agent_id": None}) is None  # the main session
+    assert fg.gate_command("s/a1", "release").startswith("FUSION_GATE_AGENT=a1 python3 ")
+
+
+def test_session_end_forgets_its_subagents():
+    async def go():
+        gate = fg.Gate(FAST)
+        await declare(gate, "s/one", "water_box")
+        await declare(gate, "t/one", "fan_shroud")
+        gate.forget("s")
+        assert set(gate.leases) == {"t/one"}
+    run(go())
+
+
+def test_check_that_comes_back_empty_is_asked_again():
+    async def go():
+        fusion, gate = rack_and_seating()
+        gate.cfg = dataclasses.replace(FAST, check_backoff=0.01)
+        await declare(gate, "a", "roof_rack_custom_solar_rails_v3")
+        await declare(gate, "b", "assy_seating")
+        answer = fusion.guard
+
+        async def flaky(plan):
+            if not getattr(flaky, "failed", False):
+                flaky.failed = True
+                return "Error: no result file"
+            return await answer(plan)
+
+        gate.guard = flaky
+        assert await call(gate, "b") is None
+        assert fusion.active.name == SEATING
+    run(go())
+
+
+def test_holder_alone_is_never_refused_for_an_unreadable_check():
+    async def go():
+        fusion, gate = rack_and_seating()
+        fusion.broken = True
+        await declare(gate, "b", "assy_seating")
+        assert await call(gate, "b") is None
+        await declare(gate, "a", "roof_rack_custom_solar_rails_v3")  # not alone any more
+        assert await call(gate, "b") == "unsafe" and gate.refused["b"].code == "no_answer"
+    run(go())
+
+
+def test_holder_whose_claude_code_has_exited_is_released():
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+
+    async def go():
+        gate = fg.Gate(FAST)
+        await gate.acquire("crashed", "rack", 60, "water_box")
+        gate.pids["crashed"] = dead.pid
+        assert "STALE" in gate.status("someone") and "exited" in gate.status("someone")
+        gate.tick()
+        assert not gate.leases
+    run(go())
+
+
+def test_stale_holders_are_shown_and_can_be_freed_by_anyone():
+    async def go():
+        gate = fg.Gate(dataclasses.replace(FAST, stale_lease=0.05))
+        await gate.acquire("1a2b3c4d-crashed", "rack", 60, "water_box")
+        await gate.acquire("5e6f-live", "shroud", 60, "fan_shroud")
+        await asyncio.sleep(0.1)
+        gate.leases["5e6f-live"].last_call = time.monotonic()
+        assert "id 1a2b3c4d" in gate.status("x") and "release --stale" in gate.status("x")
+        async with TestClient(TestServer(fg.make_app(gate))) as client:
+            r = await (await client.post("/", json={"op": "release", "session": "x", "stale": True})).json()
+            assert "Freed 1" in r["text"] and set(gate.leases) == {"5e6f-live"}
+            r = await (await client.post("/", json={"op": "release", "session": "x", "target": "5e6f"})).json()
+            assert r["ok"] and not gate.leases
     run(go())
