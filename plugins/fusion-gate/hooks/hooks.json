@@ -3,24 +3,33 @@
     "PreToolUse": [
       {
         "matcher": "mcp__fusion360__.*",
-        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook || exit 2", "timeout": 90 }]
+        "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/gate.sh\" pre || exit 2", "timeout": 90 }]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/gate.sh\" bash", "timeout": 15 }]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "mcp__fusion360__.*",
-        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook", "timeout": 15 }]
+        "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/gate.sh\" post", "timeout": 15 }]
       }
     ],
     "PostToolUseFailure": [
       {
         "matcher": "mcp__fusion360__.*",
-        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook", "timeout": 15 }]
+        "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/gate.sh\" post", "timeout": 15 }]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/gate.sh\" post", "timeout": 10 }]
       }
     ],
     "SessionEnd": [
       {
-        "hooks": [{ "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/fusion_gate.py\" hook", "timeout": 5 }]
+        "hooks": [{ "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/gate.sh\" post", "timeout": 10 }]
       }
     ]
   }

@@ -14,11 +14,13 @@ call it makes one of that session's documents active and checks it, or refuses t
     fusion_gate.py hook                              the plugin's hook (reads the event on stdin)
     fusion_gate.py serve                             the lock service; the hook starts it
     fusion_gate.py acquire REASON [-m MIN] [-d DOCS] wait for a turn and hold Fusion
-    fusion_gate.py release | status | pause | resume
+    fusion_gate.py release [--session ID | --stale]  let go, or free a holder whose session is gone
+    fusion_gate.py status | pause | resume
     fusion_gate.py protect DOCUMENT [REASON] [--clear]
 
-The hook and the commands need only the standard library and run on Python 3.9 (macOS's own
-python3); the service needs aiohttp, so it runs under `uv run --script`.
+A subagent is a holder of its own, keyed by the hook's agent_id; its commands carry
+FUSION_GATE_AGENT=<agent_id>. The plugin runs the hook under `uv run --script` (hooks/gate.sh);
+the commands need only the standard library and also run on Python 3.9 (macOS's own python3).
 """
 
 from __future__ import annotations
@@ -50,6 +52,9 @@ class Config:
     wait_block: float = 30  # a Fusion call waits this long for its turn, then is refused
     holder_wait: float = 55  # a holder's call waits this long for another holder's call,
     switch_wait: float = 20  # then this long for the gate's document check: both under the hook's 85 s
+    check_attempts: int = 3  # a check that comes back empty is asked again, within switch_wait
+    check_backoff: float = 0.5
+    stale_lease: float = 900  # status calls a holder stale after this long without a call
     acquire_wait: float = 100  # under the Bash tool's default 2 min limit
     idle_read: float = 30  # a lease ends after this long without a call
     idle_write: float = 300
@@ -86,8 +91,6 @@ NOT_RUN = "NOT run"  # agents are told to look for this in a refusal (fusion-mod
 SAVES = re.compile(r"""\.\s*save(?:As)?\s*\(|['"]save(?:As)?['"]""")  # also getattr(doc, 'save')
 CLOSES = re.compile(r"""\.\s*close\s*\(\s*[^)\s]|['"]close['"]""")  # Document.close takes an argument; a file's doesn't
 SWITCHES = re.compile(r"documents\.(?:open|add)\(|\.activate\(")
-# A script that can reach documents other than the active one, apart from making a new design.
-DOCUMENT_ACCESS = re.compile(r"\bdocuments\b(?!\s*\.\s*add\s*\()")
 RUNS_FILE = re.compile(r"""open\(\s*(['"])(/[^'"]+\.py)\1""")  # exec(open('/path/part.py').read())
 
 
@@ -127,6 +130,46 @@ def names_in(text: str, names) -> list[str]:
     """Which of `names` appear in `text` as whole names: assy_box doesn't match assy_box_water."""
     folded = text.casefold()
     return sorted(n for n in names if re.search(r"(?<![\w])" + re.escape(n) + r"(?![\w])", folded))
+
+
+def holder_key(session: str, agent: str | None) -> str:
+    """Who holds Fusion: a session, or one subagent in it ('session/agent')."""
+    return f"{session}/{agent}" if agent else session
+
+
+def parent_of(key: str | None) -> str | None:
+    return key.split("/", 1)[0] if key and "/" in key else None
+
+
+def family(a: str | None, b: str | None) -> bool:
+    """A session and its own subagents: they never wait for, or trip, each other. Siblings do."""
+    return a == b or (a is not None and parent_of(a) == b) or (b is not None and parent_of(b) == a)
+
+
+def short_id(key: str) -> str:
+    return "/".join(part[:8] for part in key.split("/"))
+
+
+def id_matches(key: str, wanted: str) -> bool:
+    """Whether `wanted` (a short_id, or the whole key) names `key`."""
+    parts, given = key.split("/"), wanted.split("/")
+    return len(parts) == len(given) and all(p.startswith(g) for p, g in zip(parts, given))
+
+
+def gate_command(key: str, rest: str) -> str:
+    """The command line a holder runs, carrying a subagent's id so the gate knows who it is."""
+    agent = key.split("/", 1)[1] if parent_of(key) else ""
+    return f"{f'FUSION_GATE_AGENT={agent} ' if agent else ''}python3 {SCRIPT} {rest}"
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def log(text: str) -> None:
@@ -203,6 +246,7 @@ class Gate:
         self.places: dict[str, tuple[int, float, float]] = {}  # session -> (rank, queued since, left at)
         self.intent: dict[str, dict] = {}  # session -> what acquire said
         self.where: dict[str, str] = {}  # session -> the project it runs in
+        self.pids: dict[str, int] = {}  # session -> its Claude Code process, when the hook was told
         self.state = state  # where protections, holders and the queue survive a restart
         self.protected: dict[str, str] = {}  # document -> why
         if state and state.exists():
@@ -306,6 +350,9 @@ class Gate:
         """What `session` works in: what it declared and what its calls created or opened. None
         when it declared nothing and so may touch any document."""
         declared = document_set(self.intent.get(session, {}).get("documents"))
+        parent = parent_of(session)
+        if declared is None and parent in self.leases:
+            declared = self.documents(parent)  # a subagent that declared nothing works in its parent's
         lease = self.leases.get(session)
         return declared | frozenset(lease.owned) if declared and lease else declared
 
@@ -316,8 +363,9 @@ class Gate:
         return not self.cfg.share or mine is None or theirs is None or bool(mine & theirs)
 
     def owner(self, document: str, besides: str | None = None) -> str | None:
-        """The holder, other than `besides`, whose documents include `document` (a base name)."""
-        return next((s for s in self.leases if s != besides and document in (self.documents(s) or ())), None)
+        """The holder, outside `besides`'s family, whose documents include `document` (a base name)."""
+        return next((s for s in self.leases if not (besides and family(s, besides))
+                     and document in (self.documents(s) or ())), None)
 
     def _protected_for(self, session: str) -> dict[str, str]:
         """Protected documents `session` didn't declare, by base name: it may never save or close them."""
@@ -331,11 +379,12 @@ class Gate:
             if other == session:
                 break
             ahead.append(other)
-        return not any(self._clash(session, other) for other in [*self.leases, *ahead])
+        return not any(self._clash(session, other) for other in [*self.leases, *ahead] if not family(session, other))
 
     def reserved(self, viewer: str) -> dict[str, str]:
         """Documents other holders declared or created: document -> who holds it."""
-        return {d: self.describe(s) for s in self.leases if s != viewer for d in sorted(self.documents(s) or ())}
+        return {d: self.describe(s) for s in self.leases if not family(s, viewer)
+                for d in sorted(self.documents(s) or ())}
 
     def _reserved_line(self, viewer: str) -> str:
         shown = self.reserved(viewer)
@@ -348,7 +397,7 @@ class Gate:
 
     def foreign(self, viewer: str) -> dict[str, str]:
         """Other holders' documents, by base name, and who holds each."""
-        return {d: self.describe(s) for s in self.leases if s != viewer for d in self.documents(s) or ()}
+        return {d: self.describe(s) for s in self.leases if not family(s, viewer) for d in self.documents(s) or ()}
 
     def _attributable(self, previous: str | None) -> bool:
         """Whether what changed in Fusion since the last check was done by `previous`'s last call:
@@ -387,27 +436,32 @@ class Gate:
         if named:
             return Refusal("names_foreign", "the script names " + "; ".join(f"{d} ({foreign[d]})" for d in named)
                            + ". Leave other agents' documents alone.")
-        if mine is not None and kind == "write" and len(self.leases) > 1 and DOCUMENT_ACCESS.search(text):
-            return Refusal("reaches_documents", (
-                "while another agent shares Fusion, a script may work only in the active document: it can't "
-                "use app.documents, apart from documents.add for a new design. The gate makes your document "
-                "active before each call; open another of yours with fusion_mcp_execute document open."))
         named = names_in(text, protected) if acts else []
         if named:
             return Refusal("protected", f"the script can {' and '.join(sorted(acts))} documents and names "
                            + "; ".join(f"{d} (protected: {protected[d]})" for d in named) + ".")
-        if mine is None and not (acts & {"save", "close"} and protected) and not self.pending:
+        # Alone with nobody queued there's no one to keep it from. What it opens meanwhile is still
+        # learnt: the next check compares against `known`, which the first check set.
+        alone = set(self.leases) == {session} and not self.queue()
+        saves_protected = bool(acts & {"save", "close"} and protected)
+        if mine is None and not saves_protected and not self.pending:
             self.known = None  # an unchecked call may open or create documents
+            return None
+        if alone and self.known is not None and not saves_protected and not self.pending:
             return None
         plan = self._plan(target=lease.active or lease.first_document, own=mine, others=foreign,
                           claim_new=previous == session and self._attributable(previous)) if mine else self._plan()
         try:
-            r = await self._ask_fusion(session, plan)
+            r = await self._ask_retrying(session, plan)
         except Exception as e:  # slow, down or a strange answer: nothing can be checked, so nothing runs
             self.known = None
-            why = (f"no answer within {ago(self.cfg.switch_wait)}" if isinstance(e, asyncio.TimeoutError)
+            if alone and not saves_protected:
+                log(f"document check for {self.describe(session)} failed ({e}); it's alone, so the call runs")
+                return None
+            why =(f"no answer within {ago(self.cfg.switch_wait)}" if isinstance(e, asyncio.TimeoutError)
                    else str(e) or type(e).__name__)
-            return Refusal("no_answer", f"the gate couldn't read which document is active in Fusion ({why}).")
+            return Refusal("no_answer", f"the gate couldn't read which document is active in Fusion ({why}). "
+                                        f"Your lease is kept: send the same call again.")
         self._take_in(previous, r)
         stopped = self._tripped(session, kind)  # the tripwire may have just gone off
         if stopped:
@@ -541,9 +595,28 @@ class Gate:
         task.add_done_callback(finished)
         return task
 
-    async def _ask_fusion(self, session: str, plan: dict, task: asyncio.Future | None = None) -> dict:
+    async def _ask_retrying(self, session: str, plan: dict) -> dict:
+        """Fusion's answer to the check, asking again after a missing or garbled one. A timeout isn't
+        retried: the check is still running in Fusion, and another would only queue behind it."""
+        deadline = time.monotonic() + self.cfg.switch_wait
+        for attempt in range(self.cfg.check_attempts):
+            try:
+                return await self._ask_fusion(session, plan, timeout=max(0.01, deadline - time.monotonic()))
+            except asyncio.TimeoutError:
+                raise
+            except Exception as e:
+                pause = self.cfg.check_backoff * 2 ** attempt
+                if attempt + 1 == self.cfg.check_attempts or time.monotonic() + pause >= deadline:
+                    raise
+                log(f"document check for {self.describe(session)} failed ({e}); asking again")
+                await asyncio.sleep(pause)
+                plan = plan | {"open_blank": False}  # the first try may already have opened one
+        raise RuntimeError("no attempts")  # check_attempts is at least 1
+
+    async def _ask_fusion(self, session: str, plan: dict, task: asyncio.Future | None = None,
+                          timeout: float | None = None) -> dict:
         task = task or self._gate_call(f"for {self.describe(session)}", plan)
-        r = await asyncio.wait_for(asyncio.shield(task), self.cfg.switch_wait)
+        r = await asyncio.wait_for(asyncio.shield(task), self.cfg.switch_wait if timeout is None else timeout)
         if not isinstance(r, dict) or not isinstance(r.get("open"), list):
             raise ValueError(f"unexpected answer {str(r)[:200]}")
         return r
@@ -592,18 +665,19 @@ class Gate:
         return "\n\n".join(filter(None, [self.welcome(lease), notice]))
 
     def welcome(self, lease: Lease) -> str:
-        text = (f"fusion-gate: you hold Fusion until you run `python3 {SCRIPT} release` or make no Fusion "
-                f"call for {ago(lease.idle)}. ")
+        text = (f"fusion-gate: you hold Fusion until you run `{gate_command(lease.session, 'release')}` or make "
+                f"no Fusion call for {ago(lease.idle)}. ")
         if self.documents(lease.session) and self.cfg.share:
             text += (f"You share Fusion with agents working in other documents, so their calls may run between "
-                     f"yours. Before each of your calls the gate makes one of your documents active (the one "
-                     f"you last used), reads app.activeDocument back, and refuses the call if it isn't yours. "
+                     f"yours. While they do, before each of your calls the gate makes one of your documents "
+                     f"active (the one you last used), reads app.activeDocument back, and refuses the call if "
+                     f"it isn't yours; a refusal keeps your lease, so send the call again. "
                      f"Documents your calls create or open become yours until you release; save a new one "
                      f"under its name straight away. Work only in the documents you declared "
-                     f"({lease.documents}); to add one, run acquire again with the longer -d list. While "
-                     f"another agent shares Fusion, a script may work only in the active document: one that "
-                     f"uses app.documents (apart from documents.add) or names another agent's document is "
-                     f"refused. If your call changes another agent's document, the gate stops you.")
+                     f"({lease.documents}); to add one, run acquire again with the "
+                     f"longer -d list. A script may find one of yours by name in app.documents; one that "
+                     f"names another agent's document is refused, and if your call changes another agent's "
+                     f"document, the gate stops you.")
         elif self.cfg.share:
             text += ("You declared no documents, so you hold all of Fusion and other agents wait. To share, "
                      "release and acquire again with -d listing every document you'll open or change.")
@@ -611,8 +685,13 @@ class Gate:
 
     def _grant(self, session: str) -> None:
         now = time.monotonic()
-        self.leases[session] = Lease(session, idle=self.cfg.idle_read, since=now, last_call=now,
-                                     documents=self.intent.get(session, {}).get("documents") or "")
+        documents = self.intent.get(session, {}).get("documents") or ""
+        parent = parent_of(session)
+        if not documents and parent in self.leases and self.documents(parent):
+            # Kept as the subagent's own, so it stays in them after its parent lets go.
+            documents = ", ".join(sorted(self.documents(parent)))
+            self.intent.setdefault(session, {})["documents"] = documents
+        self.leases[session] = Lease(session, idle=self.cfg.idle_read, since=now, last_call=now, documents=documents)
         self.places.pop(session, None)
         log(f"Fusion → {self.describe(session)}")
 
@@ -629,9 +708,29 @@ class Gate:
         return True
 
     def forget(self, session: str) -> None:
-        self.release(session, "its session ended")
-        self.places.pop(session, None)
-        self.intent.pop(session, None)
+        """A session or subagent ended; a session takes its subagents with it."""
+        for key in {session, *self.leases, *self.places, *self.intent}:
+            if key == session or parent_of(key) == session:
+                self.release(key, "its session ended")
+                self.places.pop(key, None)
+                self.intent.pop(key, None)
+                self.pids.pop(key, None)
+
+    def stale(self, session: str) -> str:
+        """Why a holder looks abandoned, or ''."""
+        pid = self.pids.get(session)
+        if pid and not alive(pid):
+            return "its Claude Code process has exited"
+        idle = time.monotonic() - self.leases[session].last_call
+        if not self.busy(session) and idle >= self.cfg.stale_lease:
+            return f"no call for {ago(idle)}"
+        return ""
+
+    def release_stale(self, by: str) -> list[str]:
+        gone = [s for s in list(self.leases) if self.stale(s)]
+        for s in gone:
+            self.release(s, f"stale ({self.stale(s)}), freed by {self.describe(by)}")
+        return gone
 
     def busy(self, session: str) -> bool:
         return any(s == session for s, _ in self.calls.values())
@@ -639,6 +738,10 @@ class Gate:
     def tick(self) -> None:
         now = time.monotonic()
         for lease in list(self.leases.values()):
+            pid = self.pids.get(lease.session)
+            if pid and not alive(pid) and not self.busy(lease.session):
+                self.release(lease.session, "its Claude Code process has exited")
+                continue
             # An acquire's estimate holds the lease even without calls the hook can see.
             if now >= lease.until and not self.busy(lease.session) and not self.pause and now - lease.last_call > lease.idle:
                 self.release(lease.session, f"no call for {ago(now - lease.last_call)}")
@@ -740,7 +843,9 @@ class Gate:
             return "you"
         where = self.where.get(session)
         reason = self.intent.get(session, {}).get("reason")
-        name = f"an agent in {where}" if where else f"agent {session[:4]}"
+        sub = parent_of(session)
+        name = (f"a subagent in {where}" if where else f"subagent {short_id(session)}") if sub else (
+            f"an agent in {where}" if where else f"agent {session[:4]}")
         return f"{name} ({reason})" if reason else name
 
     def _protected_line(self, viewer: str | None = None) -> str:
@@ -769,7 +874,7 @@ class Gate:
         places |= {s: (rank, since + shift, now) for s, (rank, since) in self.waiting.items()
                    if s not in self.leases}  # a holder mid-call isn't waiting
         data = {"protected": self.protected, "leases": leases, "places": places,
-                "intent": self.intent, "where": self.where}
+                "intent": self.intent, "where": self.where, "pids": self.pids}
         self.state.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.state.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
@@ -780,6 +885,7 @@ class Gate:
         self.protected = data.get("protected", {})
         self.intent = data.get("intent", {})
         self.where = data.get("where", {})
+        self.pids = data.get("pids", {})
         for fields in data.get("leases", []):
             lease = Lease(**fields)
             lease.since -= shift
@@ -807,7 +913,13 @@ class Gate:
             if lease.minutes:
                 parts.append(f"expects {lease.minutes:g} min")
             parts.append("a call is running" if self.busy(lease.session) else f"last call {ago(now - lease.last_call)} ago")
+            why = self.stale(lease.session)
+            if why:
+                parts.append(f"looks STALE ({why}; id {short_id(lease.session)})")
             lines.append(", ".join(parts) + ".")
+        if any(self.stale(s) for s in self.leases):
+            lines.append(f"A stale holder whose session is gone can be freed with `python3 {SCRIPT} release "
+                         f"--stale`, or one at a time with `release --session <id>`.")
         if self.calls:
             oldest = min(started for _, started in self.calls.values())
             lines.append(f"Fusion has been running a call for {ago(now - oldest)}; every other call waits until it "
@@ -841,7 +953,7 @@ def refusal(gate: Gate, why: str, session: str) -> str:
         tail = "Don't retry in a loop. Tell Cal, or wait for Fusion with the command below."
     else:
         tail = "Don't message other agents about it. Wait your turn with the command below, or do other work and try later."
-    command = (f"python3 {SCRIPT} acquire \"<what you are doing>\" -m <minutes>   "
+    command = (gate_command(session, 'acquire "<what you are doing>" -m <minutes>') + "   "
                f"(waits up to {ago(gate.cfg.acquire_wait)} and keeps your place; run it again if still queued)")
     return f"{head}, so your call was {NOT_RUN}.\n\n{gate.status(session)}\n\n{tail}\n{command}"
 
@@ -990,6 +1102,8 @@ async def handle(request):
     op, session = body.get("op"), body.get("session") or "unknown"
     if body.get("where"):
         gate.where.setdefault(session, body["where"])
+    if isinstance(body.get("pid"), int):
+        gate.pids[session] = body["pid"]
     ok, text = True, ""
     if op == "admit":
         holds = session in gate.leases
@@ -1002,6 +1116,18 @@ async def handle(request):
         text = gate.done(body.get("call", ""))
     elif op == "acquire":
         text = await gate.acquire(session, body.get("reason", ""), body.get("minutes"), body.get("documents", ""))
+    elif op == "release" and body.get("stale"):
+        gone = gate.release_stale(session)
+        text = (f"Freed {len(gone)} stale holder{'s' * (len(gone) != 1)}." if gone else "No holder looks stale.") \
+            + f"\n\n{gate.status(session)}"
+    elif op == "release" and body.get("target"):
+        found = [s for s in gate.leases if id_matches(s, body["target"])]
+        if len(found) == 1:
+            gate.release(found[0], f"freed by {gate.describe(session)}")
+            text = f"Freed {short_id(found[0])}.\n\n{gate.status(session)}"
+        else:
+            ok, text = False, (f"{'More than one holder matches' if found else 'No holder matches'} "
+                               f"{body['target']}.\n\n{gate.status(session)}")
     elif op == "release":
         text = "Released." if gate.release(session, "released") else "You weren't holding Fusion."
     elif op == "forget":
@@ -1168,13 +1294,32 @@ def deny(text: str) -> dict:
                                    "permissionDecisionReason": text}}
 
 
+GATE_COMMAND = re.compile(r"""fusion_gate\.py['"]?\s+(?:acquire|release)\b""")
+
+
+def subagent_command(event: dict) -> dict | None:
+    """A subagent's acquire or release must say which subagent it is: Bash gives it no way to tell."""
+    agent = event.get("agent_id")
+    command = str((event.get("tool_input") or {}).get("command") or "")
+    if not agent or not GATE_COMMAND.search(command) or f"FUSION_GATE_AGENT={agent}" in command:
+        return None
+    return deny(f"fusion-gate: you are a subagent, and the gate keeps your lease apart from your parent's "
+                f"and your siblings'. This command was {NOT_RUN}. Send it again with "
+                f"FUSION_GATE_AGENT={agent} in front, and use that prefix on every acquire and release: "
+                f"{gate_command(holder_key('s', agent), '...')}")
+
+
 def hook(event: dict) -> dict | None:
     """Turn a hook event into the JSON the hook prints, or None to let the call run as normal."""
-    name, session = event.get("hook_event_name"), event.get("session_id", "")
+    name = event.get("hook_event_name")
+    session = holder_key(event.get("session_id", ""), event.get("agent_id"))
     where = Path(event.get("cwd") or "").name
+    pid = int(os.environ["CLAUDE_PID"]) if os.environ.get("CLAUDE_PID", "").isdigit() else None
+    if name == "PreToolUse" and event.get("tool_name") == "Bash":
+        return subagent_command(event)
     if name == "PreToolUse":
         tool, args = event.get("tool_name", ""), event.get("tool_input") or {}
-        r = call({"op": "admit", "session": session, "where": where, "kind": classify(tool, args),
+        r = call({"op": "admit", "session": session, "where": where, "kind": classify(tool, args), "pid": pid,
                   "call": event.get("tool_use_id"), "tool": tool, "input": args}, ADMIT_TIMEOUT)
         return None if r["ok"] else deny(r["text"])
     if name in ("PostToolUse", "PostToolUseFailure"):
@@ -1182,7 +1327,7 @@ def hook(event: dict) -> dict | None:
         if r["text"] and name == "PostToolUse":
             return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": r["text"]}}
         return None
-    if name == "SessionEnd":
+    if name in ("SessionEnd", "SubagentStop"):
         call({"op": "forget", "session": session}, 5)
     return None
 
@@ -1206,7 +1351,8 @@ def run_hook(stdin: str) -> dict | None:
         return hook(event)
     except Exception as e:
         print(f"fusion-gate: {type(e).__name__}: {e}", file=sys.stderr)
-        if event.get("hook_event_name") not in ("PreToolUse", None) or _stateless(event):
+        if event.get("hook_event_name") not in ("PreToolUse", None) or event.get("tool_name") == "Bash" \
+                or _stateless(event):
             return None
         return deny(f"fusion-gate couldn't check this call ({type(e).__name__}: {e}), so it was {NOT_RUN}. "
                     f"Check the gate with `python3 {SCRIPT} status`; its log is {LOG}. Tell Cal if it "
@@ -1228,7 +1374,11 @@ def main() -> None:
     protect.add_argument("--clear", action="store_true")
     share = sub.add_parser("share", help="let agents in different documents take turns call by call")
     share.add_argument("state", choices=["on", "off"])
-    for name in ("release", "status", "pause", "resume"):
+    release = sub.add_parser("release", help="let go of Fusion, or free a holder whose session is gone")
+    freed = release.add_mutually_exclusive_group()
+    freed.add_argument("--session", metavar="ID", help="free this holder (its id from status)")
+    freed.add_argument("--stale", action="store_true", help="free every holder status calls stale")
+    for name in ("status", "pause", "resume"):
         sub.add_parser(name)
     args = parser.parse_args()
 
@@ -1240,8 +1390,12 @@ def main() -> None:
         if out:
             print(json.dumps(out))
         return
-    session = os.environ.get("CLAUDE_CODE_SESSION_ID", "cal")
+    session = holder_key(os.environ.get("CLAUDE_CODE_SESSION_ID", "cal"), os.environ.get("FUSION_GATE_AGENT"))
     payload = {"op": args.command, "session": session, "where": Path.cwd().name}
+    if os.environ.get("CLAUDE_PID", "").isdigit():
+        payload["pid"] = int(os.environ["CLAUDE_PID"])
+    if args.command == "release":
+        payload |= {"target": args.session, "stale": args.stale}
     if args.command == "acquire":
         payload |= {"reason": args.reason, "minutes": args.minutes, "documents": args.documents}
     if args.command == "protect":
